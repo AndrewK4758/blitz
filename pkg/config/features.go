@@ -16,8 +16,10 @@ package config
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -126,10 +128,14 @@ type AudioConfig struct {
 	// Speakers are two named voices for a conversation, such as a
 	// two-host overview, whose lines start "Name: " (Gemini only).
 	Speakers []SpeakerConfig `toml:"speakers"`
-	// MaxChars caps the text spoken in one call (default 9000, about ten
-	// minutes; Gemini's audio is uncompressed, about 3 MB a minute).
+	// MaxChars caps the text spoken in one call (DefaultAudioMaxChars,
+	// about ten minutes; Gemini's audio is uncompressed, about 3 MB a
+	// minute).
 	MaxChars int `toml:"max_chars"`
 }
+
+// DefaultAudioMaxChars is [audio] max_chars when it isn't set.
+const DefaultAudioMaxChars = 9_000
 
 // SpeakerConfig is one voice in a conversation.
 type SpeakerConfig struct {
@@ -286,7 +292,7 @@ type EnterpriseConfig struct {
 // the machine-wide settings set it (EN-10). u is the
 // service's address as the caller checked it. It returns the file's path.
 func SetEnterpriseURL(prefixDir, u string) (string, error) {
-	if ManagedURL() != "" {
+	if Managed() {
 		return "", ErrManaged
 	}
 	return editConfigFile(scopeDir(prefixDir, ""),
@@ -376,10 +382,22 @@ func (h HookConfig) Kind() string {
 	return h.Type
 }
 
-// Describe is what the hook runs, for people.
+// Describe is what the hook runs, for people. An http hook's says the
+// headers it sends and the environment variables they may carry, so
+// trusting a project's hook shows what leaves the computer (PRJ-24).
 func (h HookConfig) Describe() string {
 	switch h.Kind() {
 	case HookHTTP:
+		var with []string
+		if len(h.Headers) > 0 {
+			with = append(with, "headers "+strings.Join(slices.Sorted(maps.Keys(h.Headers)), ", "))
+		}
+		if len(h.AllowedEnvVars) > 0 {
+			with = append(with, "environment variables "+strings.Join(h.AllowedEnvVars, ", "))
+		}
+		if len(with) > 0 {
+			return "POST " + h.URL + " (" + strings.Join(with, "; ") + ")"
+		}
 		return "POST " + h.URL
 	case HookPrompt:
 		return "prompt: " + h.Prompt
@@ -411,15 +429,34 @@ type HooksConfig struct {
 	PermissionRequest []HookConfig `toml:"permission_request"`
 }
 
+// Events gives a pointer to each event's hooks, by event name: the one
+// list of events that ByEvent, Map and AppendHooks walk (a test holds it
+// to HooksConfig's fields).
+func (h *HooksConfig) Events() map[string]*[]HookConfig {
+	return map[string]*[]HookConfig{
+		"pre_tool": &h.PreTool, "post_tool": &h.PostTool, "prompt_submit": &h.PromptSubmit,
+		"session_start": &h.SessionStart, "session_end": &h.SessionEnd, "stop": &h.Stop,
+		"post_tool_failure": &h.PostToolFailure, "subagent_start": &h.SubagentStart, "subagent_stop": &h.SubagentStop,
+		"pre_compact": &h.PreCompact, "post_compact": &h.PostCompact, "notification": &h.Notification,
+		"permission_request": &h.PermissionRequest,
+	}
+}
+
 // ByEvent returns the hooks for each event name.
 func (h HooksConfig) ByEvent() map[string][]HookConfig {
-	return map[string][]HookConfig{
-		"pre_tool": h.PreTool, "post_tool": h.PostTool, "prompt_submit": h.PromptSubmit,
-		"session_start": h.SessionStart, "session_end": h.SessionEnd, "stop": h.Stop,
-		"post_tool_failure": h.PostToolFailure, "subagent_start": h.SubagentStart, "subagent_stop": h.SubagentStop,
-		"pre_compact": h.PreCompact, "post_compact": h.PostCompact, "notification": h.Notification,
-		"permission_request": h.PermissionRequest,
+	out := make(map[string][]HookConfig)
+	for event, list := range h.Events() {
+		out[event] = *list
 	}
+	return out
+}
+
+// Map returns h with each event's hooks replaced by fn's result for them.
+func (h HooksConfig) Map(fn func([]HookConfig) []HookConfig) HooksConfig {
+	for _, list := range h.Events() {
+		*list = fn(*list)
+	}
+	return h
 }
 
 // All returns every configured hook.
@@ -483,6 +520,10 @@ type MCPServerConfig struct {
 	// by source type (SQLite's database): a relative one is resolved
 	// where its file belongs (spec_046_databases DB-17).
 	FileSettings map[string][]string `toml:"-"`
+	// WorkspaceOnly are an in-process server's files (of Args) whose
+	// ${NAME}s it fills only from the workspace's own secrets, which Env
+	// holds apart from the rest (spec_047_connectors CON-09).
+	WorkspaceOnly []string `toml:"-"`
 }
 
 // BrowserConfig controls the browser tool (spec_027_parity §5.2): a
@@ -742,8 +783,8 @@ func applyFeatureDefaults(c *Config) {
 	c.Images = ImagesConfig{Enabled: true, Dir: filepath.Join(dir, "images"), MaxDimension: 1568, MaxInputMB: 20, RetainDays: 30}
 	c.PDF = PDFConfig{PageSize: "auto"}
 	c.Search = SearchConfig{Enabled: true, Sources: []string{"files", "documents"}, EnrichDailyLimit: 200}
-	c.Audio = AudioConfig{MaxChars: 9_000}
-	c.Web = WebConfig{Enabled: true, MaxBytes: 2 * 1024 * 1024, TimeoutSeconds: 20, BrowserFallback: true}
+	c.Audio = AudioConfig{MaxChars: DefaultAudioMaxChars}
+	c.Web = WebConfig{Enabled: true, MaxBytes: DefaultWebMaxBytes, TimeoutSeconds: DefaultWebTimeoutSeconds, BrowserFallback: true}
 	c.Browser = BrowserConfig{Enabled: true, Width: 1280, Height: 800, Show: "ask", Open: "ask"}
 	// Prices in effect when the configuration loads: a service running
 	// across a price change picks the new price up at its next restart.
@@ -786,3 +827,16 @@ type HarnessConfig struct {
 
 // DefaultReflectThreshold is [harness] reflect_threshold's default.
 const DefaultReflectThreshold = 5
+
+// Defaults the tools fall back on for a setting left at 0, the same as
+// DefaultConfig's, so each is defined once.
+const (
+	// DefaultShellTimeoutSeconds is tools.shell_timeout_seconds'.
+	DefaultShellTimeoutSeconds = 120
+	// DefaultMaxFileSizeBytes is tools.max_file_size_bytes'.
+	DefaultMaxFileSizeBytes = 10 << 20
+	// DefaultWebMaxBytes is web.max_bytes'.
+	DefaultWebMaxBytes = 2 << 20
+	// DefaultWebTimeoutSeconds is web.timeout_seconds', and web search's.
+	DefaultWebTimeoutSeconds = 20
+)

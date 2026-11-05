@@ -127,8 +127,10 @@ func TestStartersWithoutBlitzd(t *testing.T) {
 	startShared = func(context.Context, string) error { return errors.New("no blitzd") }
 	_, err = ensureService(ctx)
 	assert.ErrorContains(t, err, "starting the Blitz service: no blitzd")
-	_, _, _, err = openBackend(ctx, &config.Config{}, backendOptions{}, func(string) {})
+	var warned []string
+	_, _, _, err = openBackend(ctx, &config.Config{Warnings: []string{"unknown setting permissions.denny"}}, backendOptions{}, func(s string) { warned = append(warned, s) })
 	assert.ErrorContains(t, err, "no blitzd")
+	assert.Equal(t, []string{"unknown setting permissions.denny"}, warned, "the settings' warnings are said as the run starts")
 	startPrivate = func(context.Context, serviceOptions) (string, error) { return "", errors.New("no blitzd") }
 	_, _, _, err = openBackend(ctx, &config.Config{}, backendOptions{local: true}, func(string) {})
 	assert.ErrorContains(t, err, "starting a Blitz service for this run: no blitzd")
@@ -320,4 +322,36 @@ func TestStartersGiveUp(t *testing.T) {
 	t.Setenv("BLITZ_SOCKET", filepath.Join(file, "s.sock"))
 	_, err = attachWorkspace(context.Background(), &globalFlags{dir: t.TempDir()})
 	assert.ErrorContains(t, err, "starting the Blitz service")
+}
+
+// A workspace in a service of the run's own stops that service when it
+// closes, as /cd leaving it (or a /cd that failed) closes it: the old
+// workspace is let go at once and no blitzd is left behind (N26 cli-2#6).
+func TestPrivateServiceStopsWithItsWorkspace(t *testing.T) {
+	isolate(t)
+	ctx := context.Background()
+	warn := func(string) {}
+	a, b := t.TempDir(), t.TempDir()
+	first, _, shared, err := openBackend(ctx, mustConfig(t, a), backendOptions{local: true}, warn)
+	require.NoError(t, err)
+	assert.False(t, shared)
+	firstSock := first.(*privateRemote).sock
+	next, _, _, err := openBackend(ctx, mustConfig(t, b), backendOptions{local: true}, warn)
+	require.NoError(t, err)
+	nextSock := next.(*privateRemote).sock
+
+	require.NoError(t, first.Close())
+	assert.False(t, socket.Running(firstSock), "the service left behind stopped")
+	assert.True(t, socket.Running(nextSock), "the one moved to runs on")
+	private.mu.Lock()
+	assert.Len(t, private.list, 1)
+	private.mu.Unlock()
+
+	again, _, _, err := openBackend(ctx, mustConfig(t, a), backendOptions{local: true}, warn)
+	require.NoError(t, err, "the first workspace is free again")
+	require.NoError(t, again.Close())
+	require.NoError(t, next.Close())
+	private.mu.Lock()
+	assert.Empty(t, private.list)
+	private.mu.Unlock()
 }

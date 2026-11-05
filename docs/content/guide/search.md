@@ -9,17 +9,17 @@ Specs: [workspace search](../about/specs/spec_035_search.md), [web](../about/spe
 
 Blitz keeps an index of each workspace so you can search everything in it at once: its files (as git sees them; blocked paths such as `.env` are never indexed), the text of its PDFs and notebooks, its chats, and its notes and approved plans. Results are ranked, one per item, with the passage that matched and where it is.
 
-- **Desktop app:** type in the search box at the top (⌘K): passages from the workspace show under the matching file names. **Search the workspace** (⇧⌘F, or the last entry in that list) is the full search. Pick where to look with the chips (Files and PDFs to start); Enter opens the file at the line, the chat or the plan; a Markdown file opens in its preview, at the passage, with your words marked.
+- **Desktop app:** type in the search box at the top (⌘K): passages from the workspace show under the matching file names. **Search the workspace** (⇧⌘F, or the last entry in that list) is the full search. Pick where to look with the chips (the workspace's **Search by default in** to start, else Files and PDFs); Enter opens the file at the line, the chat or the plan; a Markdown file opens in its preview, at the passage, with your words marked.
 - **Terminal:** `/search <terms>` in a session, or `/search files|documents|chats|notes|all <terms>`; `blitz search <terms>` from the shell, with `--in`, `--json`, `--status` and `--reindex`.
 - **Agents:** the `search_workspace` tool, next to `grep`: ranked passages rather than every match.
 
 Dotfiles (`.agents/`, `.github/`) and, with **Include files left out of version control** on, ignored files such as data are indexed but hidden: they show in results when the Files shelf shows hidden files (`blitz search --hidden`); agents always see them. A CSV's first megabyte is indexed whatever its size, and with **Describe files** on, a model says what each of its columns holds, so "salinity" finds the table whose column is `Salnty`.
 
-Type words or `"a phrase"`: every term must match, word forms count (`indexing` finds `indexed`), and parts of identifiers match too (`turnsMu`). The index lives in `~/.blitz/workspaces/`, never in your folder, and catches up by itself: when the workspace opens, after each turn, and a minute after the last scan while you're idle. `/search reindex` (or **Scan again**) brings it up to date now. In the desktop app, **Settings › Workspaces › Search** turns it off or on, picks where a search looks by default, and turns on the two extras below, for that workspace, at once; in the settings file, that's `search.enabled`, `search.sources`, `search.embedding_model` and `search.enrich`.
+Type words or `"a phrase"`: every term must match, word forms count (`indexing` finds `indexed`), and parts of identifiers match too (`turnsMu`). The index lives in `~/.blitz/workspaces/`, never in your folder, and catches up by itself: when the workspace opens, after each turn, and a minute after the last scan while you're idle. `/search reindex`, in the terminal or the desktop app (or **Scan the workspace again** in the Search dialog), brings it up to date now; `/search status` says how the index is, and `/search <terms>` (or `/search files|documents|chats|notes|all <terms>`) searches, in the desktop app by opening the Search dialog with them. In the desktop app, **Settings › Workspaces › Search** turns it off or on, picks where a search looks by default, and turns on the two extras below, for that workspace, at once; in the settings file, that's `search.enabled`, `search.sources`, `search.embedding_model` and `search.enrich`.
 
 Search is local: nothing leaves your machine, unless you turn on either of these, which send your files to a model provider:
 
-- **Semantic search** (`search.embedding_model`, e.g. `gemini/text-embedding-004`, `openai/text-embedding-3-small` or `ollama/nomic-embed-text` to stay local): finds by meaning as well as words ("automobile" finds "car"). Each indexed passage is embedded once, and each query; `--mode keyword|semantic|hybrid` (or the switch in the desktop app) picks how a search ranks.
+- **Semantic search** (`search.embedding_model`, e.g. `gemini/text-embedding-004`, `openai/text-embedding-3-small` or `ollama/nomic-embed-text` to stay local): finds by meaning as well as words ("automobile" finds "car"). Each indexed passage is embedded once, and each query, with secrets redacted first; `--mode keyword|semantic|hybrid` (or the switch in the desktop app) picks how a search ranks.
 - **Summaries and tags** (`search.enrich = true`): a model describes each file in the background, up to `search.enrich_daily_limit` a day (default 200), skipping large, generated and vendored files and redacting secrets first. Results show the summary and tags, and a search finds a file by what it's about.
 
 A project's settings can't turn either on.
@@ -67,7 +67,7 @@ allow_local = true     # localhost and private addresses; cloud metadata never
 # visible = true       # watch it work
 ```
 
-Running a script the agent wrote in a page asks first unless `allow_scripts` is set. Set `[browser] enabled = false` to turn the tool off.
+Running a script the agent wrote in a page asks first unless `allow_scripts` is set (`tools.auto_approve_commands` doesn't cover it), and a `deny web(…)` rule for the page's site refuses it either way. Set `[browser] enabled = false` to turn the tool off.
 
 **In the desktop app.** With the app open, the agent browses in the app itself instead of a hidden Chrome. The first time in a chat it asks: **Watch it in a tab** (a tab with a bar saying Blitz is browsing; **Take over** to use the page yourself, **Stop** to end it) or **Run silently** (out of sight). Settings › Browser › **How the agent browses** sets it for good (`browser.show = "watch" | "silent" | "ask"`). Without the app (jobs, the command line), it's Chrome as before.
 

@@ -49,7 +49,9 @@ func TestParseSchedule(t *testing.T) {
 		"weekends at noon":          "0 12 * * 0,6",
 		"Every Monday at 8 PM":      "0 20 * * 1",
 		"on fridays at midnight":    "0 0 * * 5",
-		"every 2 days":              "0 0 */2 * *",
+		"every 2 days":              "@every 48h", // N26 safety-enterprise#29: not */2, which runs the 31st and the 1st
+		"every 10 days":             "@every 240h",
+		"every day":                 "@daily",
 		"daily at 12 am":            "0 0 * * *",
 		"Every Sunday at 7:15 a.m.": "15 7 * * 0",
 		"weekly":                    "@weekly",
@@ -102,7 +104,7 @@ Check for outdated Go modules and write reports/deps.md.
 func TestLoadWorker(t *testing.T) {
 	root := t.TempDir()
 	dir := writeWorker(t, root, "deps", valid)
-	w, err := Load(dir)
+	w, err := Load(dir, "")
 	require.NoError(t, err)
 	assert.Equal(t, "deps", w.Name, "worker %+v", w)
 	assert.Equal(t, "0 6 * * *", w.Schedule.Cron, "worker %+v", w)
@@ -118,7 +120,7 @@ func TestLoadWorker(t *testing.T) {
 	// Any change to the worker's files changes its hash.
 	before := w.Hash
 	os.WriteFile(filepath.Join(dir, "template.md"), []byte("# Report"), 0o644)
-	w2, _ := Load(dir)
+	w2, _ := Load(dir, "")
 	assert.NotEqual(t, before, w2.Hash, "adding a file didn't change the hash")
 }
 
@@ -145,16 +147,16 @@ func TestReadSpec(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := writeWorker(t, t.TempDir(), "deps", c.content)
-			spec, hash, err := ReadSpec(dir)
+			spec, hash, err := ReadSpec(dir, "")
 			require.NoError(t, err)
 			assert.Equal(t, "deps", spec.Name)
-			want, err := HashDir(dir)
+			want, err := HashDir(dir, "")
 			require.NoError(t, err)
 			assert.Equal(t, want, hash)
 			c.want(t, spec)
 		})
 	}
-	_, _, err := ReadSpec(t.TempDir())
+	_, _, err := ReadSpec(t.TempDir(), "")
 	assert.Error(t, err, "no WORKER.md")
 }
 
@@ -174,7 +176,7 @@ func TestLoadRejectsBadWorkers(t *testing.T) {
 		"bad-on-request": "---\nschedule: hourly\non_request: shrug\n---\ndo it\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Load(writeWorker(t, root, name, content))
+			_, err := Load(writeWorker(t, root, name, content), "")
 			var invalid *InvalidError
 			assert.Error(t, err, "%s", name)
 			assert.False(t, !errors.As(err, &invalid) && name != "no-frontmatter" && name != "misspelled", "%s: %v", name, err)
@@ -187,7 +189,7 @@ func TestDiscover(t *testing.T) {
 	writeWorker(t, root, "deps", valid)
 	writeWorker(t, root, "broken", "---\nschedule: whenever\n---\ndo it\n")
 	os.MkdirAll(filepath.Join(root, "notes"), 0o755) // no WORKER.md: ignored
-	list, err := Discover(root, filepath.Join(root, "missing"))
+	list, err := Discover("", root, filepath.Join(root, "missing"))
 	require.NoError(t, err, "found %d workers,", len(list))
 	require.Len(t, list, 2, "found %d workers, %v", len(list), err)
 	invalid := 0
@@ -326,7 +328,7 @@ func TestRenderLoadsBack(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), c.spec.Name)
 			require.NoError(t, os.Mkdir(dir, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(dir, FileName), data, 0o644))
-			w, err := Load(dir)
+			w, err := Load(dir, "")
 			require.NoError(t, err, "%s", data)
 			assert.Equal(t, strings.TrimSpace(c.spec.Description), w.Description)
 			assert.Equal(t, strings.TrimSpace(c.spec.Prompt), w.Prompt)
@@ -365,17 +367,17 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 		"no-newline": {"---\nschedule: hourly\n---", "workflow"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := Load(writeWorker(t, root, name, tc.content))
+			_, err := Load(writeWorker(t, root, name, tc.content), "")
 			assert.ErrorContains(t, err, tc.want)
 		})
 	}
 
-	w, err := Load(writeWorker(t, root, "explicit", "---\nschedule: hourly\noverlap: skip\ncatch_up: once\n---\ndo it\n"))
+	w, err := Load(writeWorker(t, root, "explicit", "---\nschedule: hourly\noverlap: skip\ncatch_up: once\n---\ndo it\n"), "")
 	require.NoError(t, err)
 	assert.Equal(t, "skip", w.Overlap)
 	assert.Equal(t, "once", w.CatchUp)
 
-	_, err = Load(filepath.Join(root, "missing"))
+	_, err = Load(filepath.Join(root, "missing"), "")
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
@@ -396,7 +398,7 @@ func TestLoadReportsUnhashableDirectories(t *testing.T) {
 			if _, err := os.ReadDir(p); err == nil && name == "dir" {
 				t.Skip("running with privileges that ignore file modes")
 			}
-			_, err := Load(dir)
+			_, err := Load(dir, "")
 			assert.ErrorContains(t, err, "hashing")
 		})
 	}
@@ -411,7 +413,7 @@ func TestDiscoverReportsUnreadable(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "odd", FileName), 0o755))
 	file := filepath.Join(root, "README.md")
 
-	list, err := Discover(root, file)
+	list, err := Discover("", root, file)
 	require.Len(t, list, 1)
 	assert.Equal(t, "deps", list[0].Worker.Name)
 	require.Error(t, err)

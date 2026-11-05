@@ -31,7 +31,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/api"
 	"github.com/retail-cortex/blitz/pkg/client"
 	"github.com/retail-cortex/blitz/pkg/config"
-	"github.com/retail-cortex/blitz/pkg/socket"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/textutil"
 	"github.com/spf13/cobra"
 )
@@ -40,23 +40,12 @@ import (
 // the service and returns; blitz agents lists them, and attach, logs and
 // stop work with one.
 
-// errNeedsService means the Blitz service isn't running: background runs
-// live in it.
-var errNeedsService = errors.New("background runs need the Blitz service: start it with 'blitz service install' (or run blitzd)")
-
-// serviceSocket is the running service's socket, or errNeedsService.
-func serviceSocket() (string, error) {
-	sock := socket.DefaultSocket()
-	if !socket.Running(sock) {
-		return "", errNeedsService
-	}
-	return sock, nil
-}
-
 // startBackground starts prompt as a background run in cfg's workspace
 // (blitz --bg) and says how to follow it.
-func startBackground(ctx context.Context, out io.Writer, cfg *config.Config, t api.Turn) error {
-	sock, err := serviceSocket()
+func startBackground(ctx context.Context, out io.Writer, cfg *config.Config, t api.Turn, imagePaths []string) error {
+	// Background runs live in the shared service: started when it isn't
+	// running, as for every other command that needs it (N26 cli-behaviour).
+	sock, err := ensureService(ctx)
 	if err != nil {
 		return err
 	}
@@ -68,12 +57,17 @@ func startBackground(ctx context.Context, out io.Writer, cfg *config.Config, t a
 	if err != nil {
 		return err
 	}
+	// --image and @image mentions go with the run, as they do with a turn
+	// (N26 api-client-config#8).
+	if t.Images, err = r.LoadAttachments(imagePaths, t.Text, func(msg string) { fmt.Fprintf(os.Stderr, "!  %s\n", msg) }); err != nil {
+		return withCode(exitUsage, fmt.Errorf("--image %w", err))
+	}
 	run, err := r.StartBackground(ctx, t)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Started %s in %s (session %s).\n", run.ID, run.Workspace, run.SessionID)
-	fmt.Fprintf(out, "Follow it with 'blitz attach %s' (or 'blitz logs %s -f'); stop it with 'blitz stop %s'.\n", run.ID, run.ID, run.ID)
+	fmt.Fprintln(out, i18n.T("agents.started", "id", run.ID, "workspace", run.Workspace, "session", run.SessionID))
+	fmt.Fprintln(out, i18n.T("agents.follow_hint", "id", run.ID))
 	return nil
 }
 
@@ -84,7 +78,7 @@ func newAgentsCommand() *cobra.Command {
 		Short: "List the background runs in the Blitz service (blitz --bg), in every workspace",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			sock, err := serviceSocket()
+			sock, err := ensureService(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -104,7 +98,7 @@ func newAgentsCommand() *cobra.Command {
 func printRuns(out io.Writer, list []api.BackgroundRun, all bool, now time.Time) {
 	shown := 0
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tSTATE\tAGE\tCOST\tWORKSPACE\tPROMPT")
+	fmt.Fprintln(tw, i18n.T("agents.columns"))
 	for _, r := range list {
 		if !all && !r.Active() {
 			continue
@@ -112,7 +106,7 @@ func printRuns(out io.Writer, list []api.BackgroundRun, all bool, now time.Time)
 		shown++
 		state := r.State
 		if r.Waiting > 0 {
-			state = fmt.Sprintf("waiting (%d)", r.Waiting)
+			state = i18n.T("agents.waiting", "count", r.Waiting)
 		}
 		end := now
 		if !r.Ended.IsZero() {
@@ -122,11 +116,11 @@ func printRuns(out io.Writer, list []api.BackgroundRun, all bool, now time.Time)
 			textutil.SanitizeTerminal(homeRel(r.Workspace)), textutil.SanitizeTerminal(textutil.Ellipsize(r.Prompt, 50)))
 	}
 	if shown == 0 {
-		msg := "No background runs are going"
+		msg := i18n.T("agents.none_going")
 		if all {
-			msg = "No background runs"
+			msg = i18n.T("agents.none")
 		}
-		fmt.Fprintf(out, "%s: start one with 'blitz --bg \"<prompt>\"'.\n", msg)
+		fmt.Fprintln(out, msg)
 		return
 	}
 	tw.Flush()
@@ -149,7 +143,7 @@ func newLogsCommand() *cobra.Command {
 		Short: "Show what a background run has done (with -f, as it goes on)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := serviceSocket()
+			sock, err := ensureService(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -165,7 +159,7 @@ func newLogsCommand() *cobra.Command {
 			case ctx.Err() != nil:
 				return nil
 			case ended && err != nil:
-				fmt.Fprintf(cmd.OutOrStdout(), "\nThe run failed: %v\n", err)
+				fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", i18n.T("agents.run_failed", "error", err.Error()))
 			case ended:
 				if line := tui.UsageLine(res.Before, res.After); line != "" {
 					fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", line)
@@ -173,7 +167,7 @@ func newLogsCommand() *cobra.Command {
 			case err != nil:
 				return err
 			default:
-				fmt.Fprintf(cmd.OutOrStdout(), "\n(still running: 'blitz logs %s -f' follows it)\n", args[0])
+				fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", i18n.T("agents.still_running", "id", args[0]))
 			}
 			return nil
 		},
@@ -188,7 +182,7 @@ func newStopCommand() *cobra.Command {
 		Short: "Stop a background run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := serviceSocket()
+			sock, err := ensureService(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -199,7 +193,7 @@ func newStopCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s: %s. Its session is %s ('blitz -d %s --resume %s').\n", run.ID, run.State, run.SessionID, run.Workspace, run.SessionID)
+			fmt.Fprintln(cmd.OutOrStdout(), i18n.T("agents.stopped", "id", run.ID, "state", run.State, "session", run.SessionID, "workspace", run.Workspace))
 			return nil
 		},
 	}
@@ -211,7 +205,7 @@ func newAttachCommand(o *rootOptions) *cobra.Command {
 		Short: "Open a background run's session in the REPL, following the run and answering what it asks until it ends",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := serviceSocket()
+			sock, err := ensureService(cmd.Context())
 			if err != nil {
 				return err
 			}

@@ -17,9 +17,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -270,6 +272,19 @@ func TestProjectHash(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a script edited past what's read", func(t *testing.T) {
+		orig := maxHashedBytes
+		maxHashedBytes = 4
+		t.Cleanup(func() { maxHashedBytes = orig })
+		ws := projectWorkspace(t, map[string]string{".blitz/settings.toml": base, "hook.sh": "echo one"})
+		before := LoadProject(ws).Hash()
+		assert.Equal(t, before, LoadProject(ws).Hash(), "unchanged")
+		path := filepath.Join(ws, "hook.sh")
+		require.NoError(t, os.WriteFile(path, []byte("echo two"), 0o644))
+		later := time.Now().Add(time.Minute)
+		require.NoError(t, os.Chtimes(path, later, later))
+		assert.NotEqual(t, before, LoadProject(ws).Hash(), "asks again (N26 api-client-config#17)")
+	})
 	t.Run("nothing to trust", func(t *testing.T) {
 		ws := projectWorkspace(t, map[string]string{".blitz/settings.toml": "[permissions]\ndeny = [\"web(*)\"]\n"})
 		assert.Empty(t, LoadProject(ws).Hash())
@@ -490,4 +505,56 @@ func TestProviderReady(t *testing.T) {
 		assert.True(t, cfg.providerReady(ref), ref)
 	}
 	assert.Equal(t, []string{"a"}, appendNew([]string{"a"}, "a"))
+}
+
+// A provider signed in to without a key is set up (PRJ-11; N26
+// api-client-config#18).
+func TestProviderReadySignIn(t *testing.T) {
+	cases := []struct {
+		name, ref string
+		set       func(*Config)
+		want      bool
+	}{
+		{"anthropic, no key", "anthropic/claude", func(*Config) {}, false},
+		{"anthropic OAuth", "anthropic/claude", func(c *Config) { c.LLM.Anthropic.Auth = AuthOAuth }, true},
+		{"anthropic on Vertex AI", "anthropic/claude", func(c *Config) { c.LLM.Anthropic.Auth = AuthADC }, true},
+		{"gemini ADC", "gemini/flash", func(c *Config) { c.LLM.Gemini.Auth = AuthADC }, true},
+		{"bedrock profile", "bedrock/claude", func(c *Config) { c.LLM.Bedrock.Auth = AuthOAuth }, true},
+		{"azure entra", "azure/gpt", func(c *Config) { c.LLM.Azure.Auth = AuthEntra }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.LLM.Provider = "openai"
+			tc.set(cfg)
+			assert.Equal(t, tc.want, cfg.providerReady(tc.ref))
+		})
+	}
+}
+
+// Events names every event field of HooksConfig, so a new event can't be
+// left out of ByEvent, Map, WithSource or AppendHooks.
+func TestHooksEvents(t *testing.T) {
+	var h HooksConfig
+	events := h.Events()
+	ty := reflect.TypeOf(h)
+	require.Len(t, events, ty.NumField())
+	for i := range ty.NumField() {
+		f := ty.Field(i)
+		t.Run(f.Name, func(t *testing.T) {
+			list, ok := events[f.Tag.Get("toml")]
+			require.True(t, ok, "Events has no %s", f.Tag.Get("toml"))
+			assert.Same(t, reflect.ValueOf(&h).Elem().Field(i).Addr().Interface(), list)
+		})
+	}
+	one := []HookConfig{{Command: "x"}}
+	all := h.Map(func([]HookConfig) []HookConfig { return one })
+	both := AppendHooks(all, WithSource(all, "f"))
+	for event, list := range both.ByEvent() {
+		t.Run(event, func(t *testing.T) {
+			require.Len(t, list, 2)
+			assert.Equal(t, "", list[0].Source)
+			assert.Equal(t, "f", list[1].Source)
+		})
+	}
 }

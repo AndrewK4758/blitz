@@ -125,6 +125,14 @@ func TestInstallAndApply(t *testing.T) {
 	_, problems = Apply(cfg, store)
 	assert.Contains(t, strings.Join(problems, "\n"), "an MCP server named lintd exists already")
 
+	// The organization doesn't allow MCP servers of the person's own: the
+	// plugin's isn't used either (EN-35; N26 api-client-config#1).
+	cfg = config.DefaultConfig()
+	cfg.Org = config.OrgLayer{Defaults: t.TempDir()}
+	_, problems = Apply(cfg, store)
+	assert.Empty(t, cfg.MCP.Servers)
+	assert.Contains(t, strings.Join(problems, "\n"), "plugin lint-kit: MCP server lintd isn't used: your organization's policy")
+
 	// Disabled: by the user, then enabled for a workspace, and disabled there.
 	require.NoError(t, store.SetEnabled("lint-kit", false))
 	for _, tt := range []struct {
@@ -152,6 +160,22 @@ func TestInstallAndApply(t *testing.T) {
 	assert.Empty(t, loaded)
 	assert.Contains(t, strings.Join(problems, "\n"), "changed since it was installed")
 
+	// A symbolic link added after installing: Hash skips links, so it would
+	// match; the plugin isn't loaded (N26 pkg-small-2#27).
+	reinstalled, err := Fetch(ctx, sample(t))
+	require.NoError(t, err)
+	i, err = store.Install(reinstalled)
+	require.NoError(t, err)
+	dir = store.PluginDir(i)
+	loaded, problems = Apply(config.DefaultConfig(), store)
+	require.Empty(t, problems)
+	require.Len(t, loaded, 1)
+	require.NoError(t, os.Symlink(filepath.Join(t.TempDir(), "elsewhere.md"), filepath.Join(dir, "agents", "sneaky.md")))
+	loaded, problems = Apply(config.DefaultConfig(), store)
+	assert.Empty(t, loaded)
+	assert.Contains(t, strings.Join(problems, "\n"), "changed since it was installed")
+	require.NoError(t, os.Remove(filepath.Join(dir, "agents", "sneaky.md")))
+
 	// --plugin-dir, and an enabled one that isn't installed.
 	cfg = config.DefaultConfig()
 	cfg.Plugins.Dirs = []string{sample(t), t.TempDir()}
@@ -165,6 +189,66 @@ func TestInstallAndApply(t *testing.T) {
 	assert.ErrorIs(t, store.Remove("lint-kit"), ErrNotInstalled)
 	list, _ := store.List()
 	assert.Empty(t, list)
+}
+
+// An organization that turns off the person's own plugins: none loads,
+// installed or from a folder, and that's said once; a policy that doesn't
+// say allows them, and a policy that couldn't be read doesn't (EN-35).
+func TestApplyOrgPluginsOff(t *testing.T) {
+	store := &Store{Dir: t.TempDir()}
+	st, err := Fetch(context.Background(), sample(t))
+	require.NoError(t, err)
+	_, err = store.Install(st)
+	require.NoError(t, err)
+	off, on := false, true
+	for _, tt := range []struct {
+		name   string
+		org    config.OrgLayer
+		dirs   []string
+		store  *Store
+		loaded int
+		notice bool
+	}{
+		{name: "no organization", store: store, loaded: 1},
+		{name: "the policy doesn't say", org: config.OrgLayer{Defaults: "/org"}, store: store, loaded: 1},
+		{name: "own allowed", org: orgWith(&on, ""), store: store, loaded: 1},
+		{name: "own off", org: orgWith(&off, ""), store: store, notice: true},
+		{name: "own off, a folder's too", org: orgWith(&off, ""), dirs: []string{sample(t)}, store: &Store{Dir: t.TempDir()}, notice: true},
+		{name: "own off, none to load: nothing said", org: orgWith(&off, ""), store: &Store{Dir: t.TempDir()}},
+		{name: "the policy can't be read", org: orgWith(nil, "not fetched yet"), store: store, notice: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Org = tt.org
+			cfg.Org.Policy.MCP.Own = true
+			cfg.Plugins.Dirs = tt.dirs
+			skills := len(cfg.Skills.Paths)
+			loaded, problems := Apply(cfg, tt.store)
+			assert.Len(t, loaded, tt.loaded)
+			if tt.loaded > 0 {
+				assert.Empty(t, problems)
+				return
+			}
+			assert.Len(t, cfg.Skills.Paths, skills, "no skills")
+			assert.Empty(t, cfg.PluginAgentDirs, "no agents")
+			assert.Empty(t, cfg.PluginCommandDirs, "no commands")
+			assert.Empty(t, cfg.Hooks.PostTool, "no hooks")
+			assert.Empty(t, cfg.MCP.Servers, "no MCP servers")
+			if !tt.notice {
+				assert.Empty(t, problems)
+				return
+			}
+			require.Len(t, problems, 1)
+			assert.Contains(t, problems[0], "your organization turns off your own plugins")
+		})
+	}
+}
+
+// orgWith is an organization whose policy says own for [plugins] own.
+func orgWith(own *bool, problem string) config.OrgLayer {
+	o := config.OrgLayer{Defaults: "/org", Locked: "/org-locked", Problem: problem}
+	o.Policy.Plugins.Own = own
+	return o
 }
 
 // A new version replaces the old, keeping whether it was enabled.
@@ -288,7 +372,7 @@ func TestMarketplace(t *testing.T) {
 		{ref: "tampered", wantErr: "doesn't match the hash"},
 		{ref: "liar", wantErr: `holds the plugin "lint-kit"`},
 		{ref: "nothing@acme", wantErr: "no marketplace offers"},
-		{ref: "lint-kit@elsewhere", wantErr: "no marketplace offers"},
+		{ref: "lint-kit@elsewhere", wantErr: `no marketplace "elsewhere" has been added`},
 	} {
 		t.Run(tt.ref, func(t *testing.T) {
 			st, ok, err := store.FromMarketplace(ctx, tt.ref)

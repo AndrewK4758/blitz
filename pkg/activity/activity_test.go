@@ -206,6 +206,79 @@ func TestUseDoesntWait(t *testing.T) {
 	assert.False(t, due, "kept to try again, not marked twice")
 }
 
+// A flush stuck on the network holds no one up: a mark made meanwhile,
+// in this process or another sharing the file, answers at once and is
+// still there, to send, when the flush saves what it sent (AI-11, AI-04).
+func TestMarkDuringFlush(t *testing.T) {
+	// Every wait is bounded, so a regression fails in seconds rather than
+	// hanging to Bazel's timeout; release lets the flush go on any exit.
+	const bound = 2 * time.Second
+	arrived := make(chan struct{}, 4)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		arrived <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(unblock) // runs before slow.Close, which waits for the handler
+	now := start
+	r := newRecorder(t, slow.URL, &now)
+	other := &Recorder{Dir: r.Dir, Version: r.Version, URL: slow.URL, Now: r.Now} // another process
+	due, err := r.Mark(Desktop)
+	require.NoError(t, err)
+	require.True(t, due)
+	flushed := make(chan error, 1)
+	go func() { flushed <- r.Flush(context.Background()) }()
+	select {
+	case <-arrived: // the desktop's ping is on the wire
+	case <-time.After(bound):
+		t.Fatal("the flush sent no ping")
+	}
+
+	cases := []struct {
+		name string
+		rec  *Recorder
+		fr   string
+	}{
+		{"this process", r, CLI},
+		{"another process", other, VSCode},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			type marked struct {
+				due bool
+				err error
+			}
+			got := make(chan marked, 1)
+			go func() {
+				due, err := tc.rec.Mark(tc.fr)
+				got <- marked{due, err}
+			}()
+			select {
+			case m := <-got:
+				require.NoError(t, m.err)
+				assert.True(t, m.due)
+			case <-time.After(bound):
+				t.Fatal("the mark waited for the flush")
+			}
+		})
+	}
+	unblock()
+	select {
+	case err := <-flushed:
+		require.NoError(t, err)
+	case <-time.After(bound):
+		t.Fatal("the flush didn't finish")
+	}
+	s := r.load()
+	day := start.Format(time.DateOnly)
+	assert.Equal(t, []entry{{day, Desktop}}, s.Sent)
+	assert.ElementsMatch(t, []entry{{day, CLI}, {day, VSCode}}, s.Pending, "the marks made meanwhile are kept")
+}
+
 // BLITZ_ACTIVITY_URL replaces the address (AI-13).
 func TestActivityURL(t *testing.T) {
 	s := newServer(t)

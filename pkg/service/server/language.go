@@ -75,7 +75,7 @@ func (h languageService) OpenDocument(ctx context.Context, r req[pb.OpenDocument
 	if b := r.Msg.Block; b != nil {
 		block = &engine.CodeBlock{Extension: b.Extension, ID: b.Id}
 	}
-	info, err := w.OpenDocument(r.Msg.Client, r.Msg.Path, r.Msg.Text, r.Msg.Version, block)
+	info, err := w.OpenDocument(ctx, r.Msg.Client, r.Msg.Path, r.Msg.Text, r.Msg.Version, block)
 	if err != nil {
 		return nil, languageError(err)
 	}
@@ -133,7 +133,7 @@ func (h languageService) Complete(ctx context.Context, r req[pb.CompleteRequest]
 	res := &pb.CompleteResponse{Incomplete: list.Incomplete}
 	for _, c := range list.Items {
 		item := &pb.CompletionItem{Label: c.Label, Kind: c.Kind, Detail: c.Detail, Documentation: c.Documentation,
-			InsertText: c.InsertText, Snippet: c.Snippet, SortText: c.SortText, FilterText: c.FilterText}
+			InsertText: c.InsertText, Snippet: c.Snippet}
 		if c.Edit != nil {
 			item.Edit = textEditMsg(*c.Edit)
 		}

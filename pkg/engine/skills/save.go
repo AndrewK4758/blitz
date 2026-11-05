@@ -29,6 +29,8 @@ import (
 	"strings"
 
 	"github.com/retail-cortex/blitz/pkg/engine/frontmatter"
+
+	"github.com/retail-cortex/blitz/pkg/engine/atomicfile"
 )
 
 // Writing a skill from Studio's form (spec_013_skills SK-100): SKILL.md's
@@ -41,6 +43,10 @@ var ErrChanged = errors.New("the skill changed since it was opened")
 
 // ErrUnknownSkill means there's no skill folder of that name.
 var ErrUnknownSkill = errors.New("no such skill")
+
+// ErrBadPath means a path that isn't one of a skill's own files: outside
+// its folder, or not where its files go.
+var ErrBadPath = errors.New("not one of the skill's files")
 
 // Spec is what the form edits: the skill's name (its folder's), what
 // it's for, the tools it may use (allowed-tools, as written), the agents
@@ -218,14 +224,14 @@ func Delete(dir, name string) error {
 func fileRel(rel string) (string, error) {
 	rel = path.Clean(strings.TrimSpace(rel))
 	if !inBundle(rel) {
-		return "", fmt.Errorf("%q is outside the skill's folder", rel)
+		return "", fmt.Errorf("%w: %q is outside the skill's folder", ErrBadPath, rel)
 	}
 	if IsPackageFile(rel) {
 		return rel, nil // requirements.txt, pyproject.toml, package.json, beside SKILL.md too
 	}
 	top, rest, _ := strings.Cut(rel, "/")
 	if (top != ReferencesDir && top != ScriptsDir) || rest == "" {
-		return "", fmt.Errorf("%q: a skill's files go in references/ or scripts/", rel)
+		return "", fmt.Errorf("%w: %q: a skill's files go in references/ or scripts/", ErrBadPath, rel)
 	}
 	return rel, nil
 }
@@ -270,19 +276,7 @@ func openSkill(dir, name, rel string) (*os.Root, string, error) {
 	return root, rel, nil
 }
 
-// writeAtomic writes data to p through a temporary file beside it.
-func writeAtomic(p string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".SKILL-*.md")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), p)
-}
+// writeAtomic writes data to p through a temporary file beside it,
+// readable as the skill's other files are (0644; a temporary file's 0600
+// made a skill saved in Studio owner-only).
+func writeAtomic(p string, data []byte) error { return atomicfile.Write(p, data, 0o644) }

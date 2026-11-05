@@ -42,11 +42,11 @@ Cases from last month's tickets.
 - **Near** passes when the answer means the same: scored from 0 to 1 and compared with the threshold. With `near: judge` (the default) a fast model, the suggestions model, scores it and says why; with `near: embedding` it's the similarity of the two texts' embeddings, from search's `search.embedding_model`.
 - **Scope** is what a failure means: **Fail** fails the eval, **Warn** is a warning, **Info** is only noted.
 
-A line break in a cell is `<br>`; a `|` is `\|`. Text above and below the table stays as you wrote it.
+A line break in a cell is `<br>`; a `|` is `\|`. Text above and below the table stays as you wrote it. A front matter key other than these five (`agent:` for `agents:`, say) is the eval's problem, and it doesn't run until it's fixed.
 
 ## What a case may do
 
-Each case runs in a throwaway session, unattended. It can read the workspace, but **never changes files or runs commands**: those actions are refused, and listed with the result. Add `allow: [network]` for the web tools, or `allow: [mcp]` for MCP tools. A case stops after 25 model calls or 5 minutes, scoring an answer after 2 minutes, and a case that runs over is marked as an error while the run goes on to the next. Your guardrails apply as in any turn.
+Each case runs in a throwaway session, unattended. It can read the workspace, but **never changes files or runs commands**: those actions are refused, and listed with the result. Add `allow: [network]` for the web tools, or `allow: [mcp]` for MCP tools. A case stops after 25 model calls (a limit that's fixed, and says so) or 5 minutes, scoring an answer after 2 minutes, and a case that runs over is marked as an error while the run goes on to the next. Your guardrails apply as in any turn.
 
 ## Running one
 

@@ -149,44 +149,58 @@ func (m *Manager) config(path string) *Server {
 	return nil
 }
 
-// stateOf is how language's server is now, and why it failed.
+// stateOf is how language's servers are now, and why one failed: ready
+// when one runs in any project root, else starting when one starts, else
+// the latest failure.
 func (m *Manager) stateOf(language string) (State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if s := m.running[language]; s != nil {
+	for k, s := range m.running {
+		if k.lang != language {
+			continue
+		}
 		select {
 		case <-s.c.done:
 		default:
 			return StateReady, nil
 		}
 	}
-	if m.start[language] != nil {
-		return StateStarting, nil
-	}
-	if f, ok := m.failed[language]; ok && time.Since(f.at) < failedRetry {
-		var missing *NotInstalledError
-		if errors.As(f.err, &missing) {
-			return StateMissing, f.err
+	for k := range m.start {
+		if k.lang == language {
+			return StateStarting, nil
 		}
-		return StateFailed, f.err
+	}
+	var last *failure
+	for k, f := range m.failed {
+		if k.lang == language && time.Since(f.at) < failedRetry && (last == nil || f.at.After(last.at)) {
+			last = &f
+		}
+	}
+	if last != nil {
+		var missing *NotInstalledError
+		if errors.As(last.err, &missing) {
+			return StateMissing, last.err
+		}
+		return StateFailed, last.err
 	}
 	return StateIdle, nil
 }
 
 // OpenDocument opens path (absolute) for client's editor with its text,
-// starting the server in the background when it isn't running.
-func (m *Manager) OpenDocument(client, path, text string, version int64) DocumentInfo {
-	return m.open(client, path, text, version, false)
+// starting the server in the background when it isn't running. Sending
+// the text to a running server gives up when ctx ends.
+func (m *Manager) OpenDocument(ctx context.Context, client, path, text string, version int64) DocumentInfo {
+	return m.open(ctx, client, path, text, version, false)
 }
 
 // OpenSnippet opens a code block as the file path (SnippetPath), which
 // isn't on disk: a Go fragment is made a whole file for the server, and
 // positions are the block's own.
-func (m *Manager) OpenSnippet(client, path, text string, version int64) DocumentInfo {
-	return m.open(client, path, text, version, true)
+func (m *Manager) OpenSnippet(ctx context.Context, client, path, text string, version int64) DocumentInfo {
+	return m.open(ctx, client, path, text, version, true)
 }
 
-func (m *Manager) open(client, path, text string, version int64, snippet bool) DocumentInfo {
+func (m *Manager) open(ctx context.Context, client, path, text string, version int64, snippet bool) DocumentInfo {
 	cfg := m.config(path)
 	if cfg == nil {
 		return DocumentInfo{State: StateNone}
@@ -215,7 +229,7 @@ func (m *Manager) open(client, path, text string, version int64, snippet bool) D
 	state, err := m.stateOf(cfg.Language)
 	switch state {
 	case StateReady:
-		if err := m.attach(context.Background(), doc); err != nil {
+		if err := m.attach(ctx, doc); err != nil {
 			state = StateFailed
 			info.Detail = err.Error()
 		}
@@ -274,12 +288,12 @@ func (m *Manager) attach(ctx context.Context, doc *Document) error {
 	doc.server = s
 	text, _ := serverText(doc)
 	d.mu.Unlock()
-	return s.put(doc.uri, doc.Path, text, fresh)
+	return s.put(ctx, doc.uri, doc.Path, text, fresh)
 }
 
 // put sends the editor's text for uri: held from now on (hold: one more
 // document holds it), opened in the server the first time, changed after.
-func (s *server) put(uri, path, text string, hold bool) error {
+func (s *server) put(ctx context.Context, uri, path, text string, hold bool) error {
 	s.mu.Lock()
 	if hold {
 		s.held[uri]++
@@ -296,11 +310,11 @@ func (s *server) put(uri, path, text string, hold bool) error {
 	delete(s.diags, uri)
 	s.mu.Unlock()
 	if !open {
-		return s.c.send("textDocument/didOpen", map[string]any{"textDocument": map[string]any{
+		return s.c.sendCtx(ctx, "textDocument/didOpen", map[string]any{"textDocument": map[string]any{
 			"uri": uri, "languageId": languageID(s.lang, path), "version": v, "text": text,
 		}})
 	}
-	return s.c.send("textDocument/didChange", map[string]any{
+	return s.c.sendCtx(ctx, "textDocument/didChange", map[string]any{
 		"textDocument":   map[string]any{"uri": uri, "version": v},
 		"contentChanges": []any{map[string]any{"text": text}},
 	})
@@ -618,7 +632,7 @@ func charPosition(text string, p wirePosition) Position {
 	out := Position{Line: p.Line + 1, Column: p.Character + 1}
 	if p.Line >= 0 && p.Line < len(lines) {
 		units := utf16.Encode([]rune(strings.TrimSuffix(lines[p.Line], "\r")))
-		if p.Character <= len(units) {
+		if p.Character >= 0 && p.Character <= len(units) { // the server's numbers
 			out.Column = len(utf16.Decode(units[:p.Character])) + 1
 		}
 	}
@@ -862,7 +876,11 @@ func (m *Manager) Status() []ServerStatus {
 			st.Err = err.Error()
 		}
 		m.mu.Lock()
-		st.Since = m.since[cfg.Language]
+		for k, t := range m.since {
+			if k.lang == cfg.Language && t.After(st.Since) {
+				st.Since = t
+			}
+		}
 		m.mu.Unlock()
 		if state == StateMissing {
 			st.Install = InstallHint(cfg.Language)
@@ -872,20 +890,29 @@ func (m *Manager) Status() []ServerStatus {
 	return out
 }
 
-// Restart stops language's server; the next request starts it again, and
-// the editor's documents are opened in it again.
+// Restart stops language's servers, in every project root; the next
+// request starts each again, and the editor's documents are opened in it
+// again.
 func (m *Manager) Restart(language string) error {
-	m.mu.Lock()
-	s := m.running[language]
-	delete(m.failed, language)
-	m.mu.Unlock()
-	if s == nil {
-		if m.configFor(language) == nil {
-			return fmt.Errorf("%w: %s", ErrNoServer, language)
-		}
-		return nil
+	if m.configFor(language) == nil {
+		return fmt.Errorf("%w: %s", ErrNoServer, language)
 	}
-	m.stop(s)
+	m.mu.Lock()
+	var stop []*server
+	for k, s := range m.running {
+		if k.lang == language {
+			stop = append(stop, s)
+		}
+	}
+	for k := range m.failed {
+		if k.lang == language {
+			delete(m.failed, k)
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range stop {
+		m.stop(s)
+	}
 	return nil
 }
 
@@ -903,8 +930,8 @@ func (m *Manager) configFor(language string) *Server {
 // again in its successor by their next request.
 func (m *Manager) stop(s *server) {
 	m.mu.Lock()
-	if m.running[s.lang] == s {
-		delete(m.running, s.lang)
+	if k := (serverKey{s.lang, s.root}); m.running[k] == s {
+		delete(m.running, k)
 	}
 	m.mu.Unlock()
 	s.shutdown()

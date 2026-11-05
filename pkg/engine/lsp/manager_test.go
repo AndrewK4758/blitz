@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 
 // inProcess runs lsptest.Serve in this process, over OS pipes (buffered,
 // as a real server's stdio is).
-func inProcess(context.Context, []string) (lsp.Process, error) {
+func inProcess(context.Context, string, []string) (lsp.Process, error) {
 	serverIn, clientOut, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -111,7 +111,9 @@ func testManager(t *testing.T, launch lsp.Launcher) {
 
 func TestManagerCantStart(t *testing.T) {
 	m := lsp.NewManager(t.TempDir(), []lsp.Server{{Language: "go", Command: []string{"nope"}, Extensions: []string{".go"}}},
-		func(context.Context, []string) (lsp.Process, error) { return nil, fmt.Errorf("nope isn't installed") })
+		func(context.Context, string, []string) (lsp.Process, error) {
+			return nil, fmt.Errorf("nope isn't installed")
+		})
 	defer m.Close()
 	_, err := m.Hover(context.Background(), filepath.Join(t.TempDir(), "a.go"), 1, 1)
 	assert.ErrorContains(t, err, "starting the go language server (nope): nope isn't installed")
@@ -127,7 +129,7 @@ func TestGopls(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/x\n\ngo 1.22\n"), 0o644))
 	src := filepath.Join(dir, "main.go")
 	require.NoError(t, os.WriteFile(src, []byte("package main\n\nfunc Answer() int { return 42 }\n\nfunc main() { _ = Answer() + \"x\" }\n"), 0o644))
-	launch := func(ctx context.Context, argv []string) (lsp.Process, error) { return startProcess(argv) }
+	launch := func(ctx context.Context, _ string, argv []string) (lsp.Process, error) { return startProcess(argv) }
 	m := lsp.NewManager(dir, []lsp.Server{{Language: "go", Command: []string{"gopls"}, Extensions: []string{".go"}}}, launch)
 	defer m.Close()
 	ctx := context.Background()
@@ -173,14 +175,14 @@ func TestGoplsSnippets(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/demo\n\ngo 1.22\n"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "greet"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "greet", "greet.go"), []byte("package greet\n\n// Hello greets.\nfunc Hello(name string) string { return \"hi \" + name }\n"), 0o644))
-	launch := func(ctx context.Context, argv []string) (lsp.Process, error) { return startProcess(argv) }
+	launch := func(ctx context.Context, _ string, argv []string) (lsp.Process, error) { return startProcess(argv) }
 	m := lsp.NewManager(dir, []lsp.Server{{Language: "go", Command: []string{"gopls"}, Extensions: []string{".go"}}}, launch)
 	defer m.Close()
 	ctx := context.Background()
 
 	// A block with an import of the workspace's own package.
 	text := "import \"example.com/demo/greet\"\n\nfunc main() {\n\tgreet.\n}\n"
-	info := m.OpenSnippet("w", lsp.SnippetPath(dir, "abc", ".go"), text, 1)
+	info := m.OpenSnippet(context.Background(), "w", lsp.SnippetPath(dir, "abc", ".go"), text, 1)
 	require.NotEmpty(t, info.ID)
 	var list lsp.CompletionList
 	require.Eventually(t, func() bool {
@@ -197,7 +199,7 @@ func TestGoplsSnippets(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist, "nothing written")
 
 	// A fragment of statements: wrapped, positions the block's own.
-	frag := m.OpenSnippet("w", lsp.SnippetPath(dir, "def", ".go"), "x := 1\ny := undefinedName\nfmt.Println(x, y)\n", 1)
+	frag := m.OpenSnippet(context.Background(), "w", lsp.SnippetPath(dir, "def", ".go"), "x := 1\ny := undefinedName\nfmt.Println(x, y)\n", 1)
 	got := make(chan lsp.DocumentDiagnostics, 8)
 	wctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -241,10 +243,10 @@ func TestGoplsSnippetsOutsideModule(t *testing.T) {
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "backend"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "backend", "go.mod"), []byte("module example.com/backend\n\ngo 1.22\n"), 0o644))
-	launch := func(ctx context.Context, argv []string) (lsp.Process, error) { return startProcess(argv) }
+	launch := func(ctx context.Context, _ string, argv []string) (lsp.Process, error) { return startProcess(argv) }
 	m := lsp.NewManager(dir, []lsp.Server{{Language: "go", Command: []string{"gopls"}, Extensions: []string{".go"}}}, launch)
 	defer m.Close()
-	info := m.OpenSnippet("w", m.SnippetPath("abc", ".go"), "package daemon\n\nimport \"fmt\"\n\nfunc F() { fmt.Println(1) }\n", 1)
+	info := m.OpenSnippet(context.Background(), "w", m.SnippetPath("abc", ".go"), "package daemon\n\nimport \"fmt\"\n\nfunc F() { fmt.Println(1) }\n", 1)
 	require.NotEmpty(t, info.ID)
 	var hover string
 	require.Eventually(t, func() bool {
@@ -287,14 +289,14 @@ func TestPyright(t *testing.T) {
 		t.Skip("set BLITZ_TEST_PYRIGHT=1 to ask pyright")
 	}
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
-	launch := func(ctx context.Context, argv []string) (lsp.Process, error) { return startProcess(argv) }
+	launch := func(ctx context.Context, _ string, argv []string) (lsp.Process, error) { return startProcess(argv) }
 	m := lsp.NewManager(dir, []lsp.Server{{Language: "python", Command: []string{"pyright-langserver", "--stdio"}, Extensions: []string{".py"}}}, launch)
 	defer m.Close()
 	ctx := context.Background()
 	text := "import os\n\ndef greet(name: str) -> str:\n    return 'hi ' + name\n\nprint(greet(42))\nos.pa\n"
 	for _, info := range []lsp.DocumentInfo{
-		m.OpenDocument("w", filepath.Join(dir, "demo.py"), text, 1),
-		m.OpenSnippet("w", lsp.SnippetPath(dir, "py", ".py"), text, 1),
+		m.OpenDocument(context.Background(), "w", filepath.Join(dir, "demo.py"), text, 1),
+		m.OpenSnippet(context.Background(), "w", lsp.SnippetPath(dir, "py", ".py"), text, 1),
 	} {
 		require.NotEmpty(t, info.ID)
 		var list lsp.CompletionList

@@ -17,15 +17,20 @@ package gates
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/retail-cortex/blitz/pkg/engine/frontmatter"
+	"github.com/retail-cortex/blitz/pkg/redact"
 	"github.com/retail-cortex/blitz/pkg/textutil"
 	"gopkg.in/yaml.v3"
 )
@@ -204,7 +209,7 @@ type guardMeta struct {
 }
 
 // ParseGuardrail reads a guardrail file; what doesn't hold is its
-// Problem (it's skipped).
+// Problem (it's skipped; a built-in's runs with its defaults).
 func ParseGuardrail(name, path string, data []byte) Guardrail {
 	g := Guardrail{Name: name, Path: path}
 	front, body, ok := frontmatter.Split(data)
@@ -216,7 +221,7 @@ func ParseGuardrail(name, path string, data []byte) Guardrail {
 			return g
 		}
 	}
-	g.Builtin, g.Stage, g.Action = strings.TrimSpace(m.Builtin), strings.TrimSpace(m.Stage), strings.TrimSpace(m.Action)
+	g.Builtin, g.Stage, g.Action = lower(m.Builtin), lower(m.Stage), lower(m.Action)
 	g.Agents, g.Tools, g.Description, g.PII = m.Agents, m.Tools, m.Description, m.PII
 	g.Judge = m.Judge != nil && *m.Judge
 	l := m.Limits
@@ -230,7 +235,7 @@ func ParseGuardrail(name, path string, data []byte) Guardrail {
 	// What a built-in's file leaves out runs as it would without one: the
 	// injection judge on; limits' ceilings and commands (commands: [] is
 	// none).
-	switch strings.TrimSpace(m.Builtin) {
+	switch g.Builtin {
 	case BuiltinInjection:
 		g.Judge = m.Judge == nil || *m.Judge
 	case BuiltinLimits:
@@ -246,7 +251,87 @@ func ParseGuardrail(name, path string, data []byte) Guardrail {
 	}
 	g.Off = m.Enabled != nil && !*m.Enabled
 	g.Problem = checkGuardrail(&g)
+	if g.Problem == "" && g.Builtin == BuiltinLimits {
+		g.Problem = misplacedLimits(front)
+	}
+	if g.Problem == "" {
+		g.Problem = unknownKeys(front)
+	}
+	// A file named after a built-in is that built-in's: as anything else
+	// it would take the built-in's place, its ceilings and refusals gone
+	// without a word. It's a problem, and the built-in runs with its
+	// defaults (Active).
+	if _, ok := BuiltinOf(name); ok && g.Builtin != name {
+		if _, known := BuiltinOf(g.Builtin); g.Builtin == "" || known || g.Problem == "" {
+			g.Problem = fmt.Sprintf("%s.md is the built-in %s guardrail's file: add builtin: %s, or rename it", name, name, name)
+		}
+		g.Builtin = ""
+	}
 	return g
+}
+
+// limitKeys are the limits guardrail's settings, which go under limits:.
+var limitKeys = []string{"max_cost_usd", "max_turns", "max_files_changed", "allowed_domains", "commands"}
+
+// misplacedLimits is the problem of a limits file with a setting at the
+// top of its front matter, where it isn't read ("" for none): without
+// it, max_turns: 0 there would leave the turn at 200 model calls.
+func misplacedLimits(front []byte) string {
+	var top map[string]any
+	if yaml.Unmarshal(front, &top) != nil {
+		return ""
+	}
+	for _, k := range limitKeys {
+		if _, ok := top[k]; ok {
+			return fmt.Sprintf("%s goes under limits: (limits:\n  %s: …)", k, k)
+		}
+	}
+	return ""
+}
+
+// lower is a setting's value as it's compared: trimmed, in lower case
+// (action: Block is block).
+func lower(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// guardKeys are a guardrail file's settings, with the catalog's lock and
+// groups (spec_053 EN-31) and a name, which Blitz doesn't read.
+var guardKeys = []string{"builtin", "stage", "action", "agents", "tools", "description", "pii", "judge", "limits", "enabled", "lock", "groups", "name"}
+
+// unknownKeys is the problem of a guardrail file with a setting Blitz
+// doesn't know, at the top or under limits: ("" for none): a misspelt
+// allowed_domain would otherwise leave every domain allowed without a
+// word.
+func unknownKeys(front []byte) string {
+	var top map[string]any
+	if yaml.Unmarshal(front, &top) != nil {
+		return ""
+	}
+	keys := slices.Sorted(maps.Keys(top))
+	for _, k := range keys {
+		if !slices.Contains(guardKeys, k) && !slices.Contains(limitKeys, k) {
+			return fmt.Sprintf("%s: not a guardrail's setting (%s)", k, strings.Join(guardKeys[:10], ", "))
+		}
+	}
+	if l, ok := top["limits"].(map[string]any); ok {
+		for _, k := range slices.Sorted(maps.Keys(l)) {
+			if !slices.Contains(limitKeys, k) {
+				return fmt.Sprintf("limits: %s: not a limit (%s)", k, strings.Join(limitKeys, ", "))
+			}
+		}
+	}
+	return ""
+}
+
+// For is the built-in g stands for: its builtin, or, for a file with a
+// problem, the built-in it's named after ("" for neither).
+func (g Guardrail) For() string {
+	if _, ok := BuiltinOf(g.Builtin); ok {
+		return g.Builtin
+	}
+	if _, ok := BuiltinOf(g.Name); ok && g.Problem != "" {
+		return g.Name
+	}
+	return ""
 }
 
 // checkGuardrail fills in a built-in's stage and default action and says
@@ -303,7 +388,11 @@ func LoadGuardrails(dirs ...string) []Guardrail {
 	var out []Guardrail
 	seen := map[string]bool{}
 	for _, dir := range dirs {
-		entries, _ := os.ReadDir(dir)
+		entries, err := os.ReadDir(dir)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			// Its guardrails can't be read: Studio says so, by the folder.
+			out = append(out, Guardrail{Name: filepath.Base(dir), Path: dir, Problem: "couldn't read the folder: " + err.Error()})
+		}
 		for _, e := range entries {
 			if !e.Type().IsRegular() || !strings.HasSuffix(strings.ToLower(e.Name()), ".md") {
 				continue
@@ -313,11 +402,12 @@ func LoadGuardrails(dirs ...string) []Guardrail {
 				continue
 			}
 			p := filepath.Join(dir, e.Name())
+			seen[name] = true
 			data, err := os.ReadFile(p)
 			if err != nil {
+				out = append(out, Guardrail{Name: name, Path: p, Problem: "couldn't read it: " + err.Error()})
 				continue
 			}
-			seen[name] = true
 			out = append(out, ParseGuardrail(name, p, data))
 		}
 	}
@@ -343,11 +433,20 @@ func LoadGuardrails(dirs ...string) []Guardrail {
 }
 
 // Active are the guardrails that hold (no problem, not switched off) at
-// stage for agent.
+// stage for agent. A built-in whose file has a problem runs with its
+// defaults, as without a file: a mistake in limits.md mustn't take away
+// its ceilings and refused commands.
 func Active(all []Guardrail, stage, agent string) []Guardrail {
 	var out []Guardrail
 	for _, g := range all {
-		if g.Problem == "" && !g.Off && g.Stage == stage && g.GuardsAgent(agent) {
+		if g.Problem != "" {
+			b, ok := BuiltinOf(g.For())
+			if !ok || slices.ContainsFunc(all, func(o Guardrail) bool { return o.Problem == "" && o.Builtin == b.ID }) {
+				continue
+			}
+			g = BuiltinDefault(b)
+		}
+		if !g.Off && g.Stage == stage && g.GuardsAgent(agent) {
 			out = append(out, g)
 		}
 	}
@@ -428,7 +527,10 @@ func DomainAllowed(raw string, domains []string) bool {
 // too; ? one character) that a shell line matches, "" when none does. A
 // glob is matched against the whole line, its spaces made single, and
 // against each command it runs: split at ;, &&, ||, | and new lines,
-// with sudo, env and VAR=value before it dropped. An rm is matched as
+// with those in $(…), `…` and sh -c "…" too, and sudo, env, nice,
+// nohup, time and VAR=value before it dropped with their options. A git
+// command is matched without git's own options (git -C dir push as git
+// push), a push's bundled short flags one each (-uf as -u -f). An rm is matched as
 // "rm -rf <path>" (or -r, -f) once per path, whatever order or spelling
 // its flags have (-fr, -R -f, --recursive --force), $HOME and ${HOME}
 // read as ~ and a trailing /* as the folder itself; so "rm -rf ~/"
@@ -461,20 +563,122 @@ var envAssign = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // commandParts are the commands a shell line runs, as CommandDenied
 // matches them.
 func commandParts(line string) []string {
+	return commandPartsDepth(line, 0)
+}
+
+// subshell is a $(…) or `…` in a line: the commands in it run too.
+var subshell = regexp.MustCompile("\\$\\(([^()]*)\\)|`([^`]*)`")
+
+func commandPartsDepth(line string, depth int) []string {
 	var out []string
+	if depth > 4 {
+		return out
+	}
+	for _, m := range subshell.FindAllStringSubmatch(line, -1) {
+		out = append(out, commandPartsDepth(m[1]+m[2], depth+1)...)
+	}
 	for _, part := range commandSep.Split(line, -1) {
-		f := strings.Fields(part)
-		for len(f) > 0 && (f[0] == "sudo" || f[0] == "env" || f[0] == "command" || f[0] == "exec" || envAssign.MatchString(f[0])) {
-			f = f[1:]
-		}
+		f := dropPrefixes(strings.Fields(part))
 		if len(f) == 0 {
 			continue
 		}
-		if f[0] == "rm" || strings.HasSuffix(f[0], "/rm") {
+		switch name := path.Base(f[0]); {
+		case name == "rm":
 			out = append(out, rmParts(f[1:])...)
+			continue
+		case name == "git":
+			f = gitParts(f)
+		case shells[name] && len(f) > 2 && strings.HasPrefix(f[1], "-") && strings.HasSuffix(f[1], "c"):
+			// bash -c "…": the string's commands run.
+			script := strings.Join(f[2:], " ")
+			if q := script[:1]; (q == `"` || q == "'") && strings.Count(script, q) >= 2 {
+				script = script[1:strings.LastIndex(script, q)]
+			}
+			out = append(out, commandPartsDepth(script, depth+1)...)
 			continue
 		}
 		out = append(out, strings.Join(f, " "))
+	}
+	return out
+}
+
+// shells run a command string given with -c.
+var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true}
+
+// prefixOptions are the options that take an argument, for the commands
+// that run another one (sudo -u root rm …); others are dropped alone.
+var prefixOptions = map[string]map[string]bool{
+	"sudo":    {"-u": true, "-g": true, "-C": true, "-D": true, "-h": true, "-p": true, "-r": true, "-t": true, "-T": true, "-U": true, "--user": true, "--group": true, "--chdir": true, "--host": true, "--prompt": true, "--role": true, "--type": true, "--other-user": true, "--close-from": true, "--command-timeout": true},
+	"env":     {"-u": true, "-C": true, "-S": true, "--unset": true, "--chdir": true, "--split-string": true},
+	"nice":    {"-n": true, "--adjustment": true},
+	"nohup":   {},
+	"time":    {"-f": true, "-o": true, "--format": true, "--output": true},
+	"command": {},
+	"exec":    {"-a": true},
+}
+
+// dropPrefixes is f with what runs the command before it taken off:
+// sudo, env, nice, nohup, time, command and exec with their options, and
+// VAR=value.
+func dropPrefixes(f []string) []string {
+	for len(f) > 0 {
+		if envAssign.MatchString(f[0]) {
+			f = f[1:]
+			continue
+		}
+		opts, ok := prefixOptions[path.Base(f[0])]
+		if !ok {
+			return f
+		}
+		f = f[1:]
+		for len(f) > 0 && strings.HasPrefix(f[0], "-") {
+			a := f[0]
+			f = f[1:]
+			if a == "--" {
+				break
+			}
+			if strings.Contains(a, "=") {
+				continue
+			}
+			// -u root, or -Eu root: the last short option takes it.
+			if opts[a] || (!strings.HasPrefix(a, "--") && len(a) > 2 && opts["-"+a[len(a)-1:]]) {
+				if len(f) > 0 {
+					f = f[1:]
+				}
+			}
+		}
+	}
+	return f
+}
+
+// gitOptions are git's own options that take an argument (git -C dir
+// push …).
+var gitOptions = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--config-env": true, "--exec-path": true, "--super-prefix": true}
+
+// gitParts is a git command as "git <subcommand> …", git's own options
+// before the subcommand dropped, and a push's short flags one each
+// (-uf as -u -f).
+func gitParts(f []string) []string {
+	out := []string{"git"}
+	i := 1
+	for i < len(f) && strings.HasPrefix(f[i], "-") {
+		if gitOptions[f[i]] {
+			i++
+		}
+		i++
+	}
+	if i >= len(f) {
+		return f
+	}
+	out = append(out, f[i])
+	for _, a := range f[i+1:] {
+		if f[i] == "push" && len(a) > 2 && a[0] == '-' && a[1] != '-' {
+			for _, c := range a[1:] {
+				out = append(out, "-"+string(c))
+			}
+			continue
+		}
+		out = append(out, a)
 	}
 	return out
 }
@@ -738,7 +942,13 @@ func Describe(g Guardrail) string {
 		line("  redact takes each matching phrase out of the result, leaving %q in its place, and passes the rest", InjectionNote)
 	case BuiltinSecrets:
 		line("runs: on every piece of the agent's answer as it streams, before the user sees it (stage %s), for %s", StageOutput, agents)
-		line("checks: credentials in the answer: private keys (PEM), AWS access key ids, OpenAI and Anthropic keys, Google API keys, GitHub tokens, Slack tokens, JWTs, password/secret/token/api_key assignments, and the values of the workspace's own secrets")
+		var kinds []string
+		for _, f := range redact.Formats {
+			if !slices.Contains(kinds, f.Kind+"s") {
+				kinds = append(kinds, f.Kind+"s")
+			}
+		}
+		line("checks: credentials in the answer: %s, password/secret/token/api_key assignments, and the values of the workspace's own secrets", strings.Join(kinds, ", "))
 		if g.PII {
 			line("  and personal data: email addresses, phone numbers, card numbers and US social security numbers (pii: true)")
 		} else {
@@ -749,7 +959,7 @@ func Describe(g Guardrail) string {
 		l := g.Limits
 		line("checks:")
 		if cmds := ExpandCommands(l.Commands); len(cmds) > 0 {
-			line("  - shell commands refused (globs on the whole line and on each command in it, sudo and env dropped, rm's flags in any order and each path on its own, $HOME as ~, a folder's /* as the folder):")
+			line("  - shell commands refused (globs on the whole line and on each command in it, those in $(…) and sh -c too, sudo, env, nice, nohup and time dropped with their options, git's own options dropped and a push's short flags one each, rm's flags in any order and each path on its own, $HOME as ~, a folder's /* as the folder):")
 			if slices.ContainsFunc(l.Commands, func(c string) bool { return strings.EqualFold(strings.TrimSpace(c), DefaultsEntry) }) {
 				line("      (%q: Blitz's defaults, as they are in this version, below)", DefaultsEntry)
 			}

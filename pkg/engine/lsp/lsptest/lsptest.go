@@ -42,10 +42,11 @@ func MaybeServe() {
 	}
 }
 
-// Launcher starts the fake server: this test binary, again.
+// Launcher starts the fake server: this test binary, again, in dir.
 func Launcher() lsp.Launcher {
-	return func(ctx context.Context, argv []string) (lsp.Process, error) {
+	return func(ctx context.Context, dir string, argv []string) (lsp.Process, error) {
 		cmd := exec.Command(os.Args[0])
+		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), envVar+"=1")
 		in, err := cmd.StdinPipe()
 		if err != nil {
@@ -121,7 +122,10 @@ func Serve(in io.Reader, out io.Writer) {
 			if !strings.Contains(text, "fixed") {
 				diags = append(diags, map[string]any{"range": loc(0, 2)["range"], "severity": 1, "message": "fake problem", "source": "fake"})
 			}
-			send(map[string]any{"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": map[string]any{"uri": uri, "diagnostics": diags}})
+			// With the version they're about, as gopls and pyright send it.
+			td, _ := p["textDocument"].(map[string]any)
+			version, _ := td["version"].(float64)
+			send(map[string]any{"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics", "params": map[string]any{"uri": uri, "version": int(version), "diagnostics": diags}})
 		case "textDocument/definition":
 			reply([]any{map[string]any{"targetUri": uri, "targetSelectionRange": loc(1, 5)["range"], "targetRange": loc(1, 0)["range"]}})
 		case "textDocument/references":

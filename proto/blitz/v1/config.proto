@@ -425,6 +425,11 @@ message DescribeConfigResponse {
 message ConfigChange {
   string path = 1;
   string model_error = 2;
+  // What the open workspaces the change touches (every one, for the global
+  // settings) couldn't take up, each "<folder>: <what>": settings that
+  // don't load, permission rules that can't be read (so aren't enforced),
+  // MCP servers that didn't start. Empty when all took it.
+  repeated string problems = 3;
 }
 
 // Request message for ConfigService.SetApiKey.
@@ -754,6 +759,8 @@ message AddPermissionResponse {
 message RemovePermissionRequest {
   string workspace = 1;
   string rule = 2;
+  // The list to remove it from (allow, ask or deny); "" for every list.
+  string effect = 3;
 }
 
 // Response message for ConfigService.RemovePermission.
@@ -818,8 +825,9 @@ message RegistrySkill {
   string name = 2;
   string description = 3;
   string version = 4;
-  // Its id in the Castor registry, when it has one.
-  string castor_id = 5;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string castor_id = 5 [deprecated = true];
 }
 
 // A skill installed from a registry.
@@ -1440,7 +1448,9 @@ message OrgWorkspace {
   // owner, editor, runner or viewer.
   string role = 3;
   bool sync = 4;
-  string clone_url = 5;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string clone_url = 5 [deprecated = true];
   // Where it is, or would be, cloned on this computer.
   string dir = 6;
   bool cloned = 7;
@@ -1486,6 +1496,10 @@ message OpenOrgWorkspaceResponse {
 // Request message for ConfigService.GitCredential.
 message GitCredentialRequest {
   string host = 1;
+  // How Git would send it (https or http): the token is given only over
+  // the service's own scheme, never to an http:// address of an https
+  // service. Empty from an older helper.
+  string protocol = 2;
 }
 
 // Response message for ConfigService.GitCredential.
@@ -1512,6 +1526,9 @@ message GetOrgSyncResponse {
   repeated OrgSyncPair pairs = 2;
   // Why it's offline or refused, in Git's words ("" otherwise).
   string error = 3;
+  // Whether the service hasn't got this computer's saves (offline,
+  // signed_out, refused or secrets).
+  bool failed = 4;
 }
 
 // Request message for ConfigService.TakeServiceRun.
@@ -1539,6 +1556,9 @@ message SaveOrgSyncResponse {
   repeated OrgSyncPair pairs = 2;
   // Why it's offline or refused, in Git's words ("" otherwise).
   string error = 3;
+  // Whether the service hasn't got this computer's saves (offline,
+  // signed_out, refused or secrets).
+  bool failed = 4;
 }
 
 // A job the organization's service runs.
@@ -1580,7 +1600,9 @@ message ServiceRun {
   // (approve or deny, with a note).
   ServiceRequest pending = 12;
   string answer = 13;
-  string answer_note = 14;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string answer_note = 14 [deprecated = true];
   // Whether its changes are on main too, and why not when they're on its
   // branch only.
   bool merged = 15;
@@ -1661,7 +1683,9 @@ message ServiceRunFile {
   // Its path in the run's files (out/report.csv, events.jsonl).
   string path = 2;
   int64 size = 3;
-  string media_type = 4;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string media_type = 4 [deprecated = true];
 }
 
 // Request message for ConfigService.ListServiceRunFiles.
@@ -1697,14 +1721,16 @@ message GoingServiceRun {
   string dir = 5;
 }
 
-// One run's change: queued, started, ended, or its branch pushed.
+// One run's change: queued, started, ended, or its branch pushed. A
+// client asks again for the job's runs.
 message ServiceRunChange {
-  string run_id = 1;
   string job_id = 2;
-  // Its workspace's handle, and where it's cloned on this computer.
-  string workspace = 3;
-  string dir = 4;
-  string status = 5;
+  // Removed 2026-11-05 (scan N26-service#11: no client read them).
+  // Deprecated: no longer set (kept for older clients).
+  string run_id = 1 [deprecated = true];
+  string workspace = 3 [deprecated = true];
+  string dir = 4 [deprecated = true];
+  string status = 5 [deprecated = true];
 }
 
 // Request message for ConfigService.WatchServiceRuns.
@@ -1773,7 +1799,9 @@ message OrgUsed {
   string model = 1;
   int64 requests = 2;
   int64 input_tokens = 3;
-  int64 cached_input_tokens = 4;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  int64 cached_input_tokens = 4 [deprecated = true];
   int64 output_tokens = 5;
   double cost_usd = 6;
 }

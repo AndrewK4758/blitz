@@ -51,6 +51,13 @@ func openTest(t *testing.T) *Workspace {
 // openTestWith is openTest with configuration changes and model replies.
 func openTestWith(t *testing.T, mutate func(*config.Config), replies ...*genai.Content) (*Workspace, *runtime.MockLLM) {
 	t.Helper()
+	return openTestStreaming(t, 0, mutate, replies...)
+}
+
+// openTestStreaming is openTestWith streaming the replies that are only
+// text, in pieces of chunk bytes (none when 0).
+func openTestStreaming(t *testing.T, chunk int, mutate func(*config.Config), replies ...*genai.Content) (*Workspace, *runtime.MockLLM) {
+	t.Helper()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MODENV_PREFIX", "")
 	t.Chdir(t.TempDir())
@@ -63,7 +70,8 @@ func openTestWith(t *testing.T, mutate func(*config.Config), replies ...*genai.C
 		mutate(cfg)
 	}
 	llm := runtime.NewMockLLM("gemini-3.8-flash", replies...)
-	w, err := Open(context.Background(), cfg, Options{Model: llm, NewModel: mockModels})
+	llm.Chunk = chunk
+	w, err := Open(context.Background(), cfg, Options{Model: llm, NewModel: mockModels, Streaming: chunk > 0})
 	require.NoError(t, err)
 	t.Cleanup(func() { w.Close() })
 	return w, llm
@@ -233,6 +241,37 @@ func TestOpenSessionSetsAuditContextAndMapsResumeErrors(t *testing.T) {
 	assert.Equal(t, rec.ID, got.ID, "resume by id: %+v %v %v", got, resumed, err)
 }
 
+// --continue and --resume latest carry on the person's latest chat, not a
+// newer job's, background or eval run (spec_017 SES-31; N26
+// engine-top-2#8).
+func TestSelectSessionSkipsRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name, title, origin string
+	}{
+		{name: "a job's run", title: "⏰ daily 2026-11-04 06:00", origin: session.OriginWorker},
+		{name: "a job's run saved before origins", title: "⏰ daily 2026-11-04 06:00"},
+		{name: "a background run", title: "check", origin: session.OriginBackground},
+		{name: "an eval's case", title: "eval x c1", origin: session.OriginEval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := session.NewStorage(t.TempDir())
+			require.NoError(t, err)
+			mine, _, err := selectSession(st, "", false, "mine", "a")
+			require.NoError(t, err)
+			require.NoError(t, st.AddMessage("user", "hello"))
+			time.Sleep(10 * time.Millisecond) // a newer update time
+			run, err := st.CreateSession(session.NewSessionID(), tc.title, "a")
+			require.NoError(t, err)
+			run.Origin = tc.origin
+			require.NoError(t, st.AddMessage("user", "the run's prompt"))
+			got, resumed, err := selectSession(st, "", true, "", "")
+			require.NoError(t, err)
+			assert.True(t, resumed)
+			assert.Equal(t, mine.ID, got.ID)
+		})
+	}
+}
+
 func TestSelectSession(t *testing.T) {
 	st, err := session.NewStorage(t.TempDir())
 	require.NoError(t, err)
@@ -278,6 +317,15 @@ func TestModelErrorSummary(t *testing.T) {
 	assert.Equal(t, "api key is required", got, "summary = %q", got)
 	leak := ModelErrorSummary(errors.New("bad key AIzaSySECRETSECRETSECRETSECRETSECRET123"), cfg)
 	assert.NotContains(t, leak, "SECRET", "key leaked: %q", leak)
+	// Every credential the settings hold, as the log's redactor masks them:
+	// Azure's key, the web search key, an MCP server's token.
+	cfg.LLM.Azure.APIKey = "0123456789abcdef0123456789abcdef"
+	cfg.Web.SearchAPIKey = "search-key-SECRET-77"
+	cfg.MCP.Servers = []config.MCPServerConfig{{Name: "gh", Env: map[string]string{"GITHUB_TOKEN": "mcp-token-SECRET-88"}}}
+	for _, v := range []string{"0123456789abcdef0123456789abcdef", "search-key-SECRET-77", "mcp-token-SECRET-88"} {
+		got := ModelErrorSummary(errors.New("upstream said "+v), cfg)
+		assert.NotContains(t, got, v, "leaked: %q", got)
+	}
 
 	// A quota error is kept whole, on one line, whatever wraps it.
 	quota := fmt.Errorf("anthropic: %w", &runtime.QuotaError{Message: "Quota exceeded for aiplatform.googleapis.com/x.\nPlease submit a quota increase request."})
@@ -525,6 +573,15 @@ func TestOpenWarnings(t *testing.T) {
 			require.NoError(t, os.WriteFile(file, nil, 0o644))
 			c.Audit.Enabled, c.Audit.Dir = true, filepath.Join(file, "audit")
 		}, want: "audit log disabled"},
+		// N26 engine-tools-2#18: said at the start, not found out at /undo.
+		{name: "checkpoints that can't be kept on disk", mutate: func(t *testing.T, c *config.Config) {
+			file := filepath.Join(t.TempDir(), "file")
+			require.NoError(t, os.WriteFile(file, nil, 0o644))
+			c.Checkpoints.Enabled, c.Checkpoints.Dir = true, filepath.Join(file, "checkpoints")
+		}, want: "checkpoints are kept in memory only"},
+		// N26 engine-tools-2#28: a setting that's ignored says so.
+		{name: "a process limit that isn't a duration", mutate: func(_ *testing.T, c *config.Config) { c.Processes.BusyFor = "2 minutes" },
+			want: `processes.busy_for = "2 minutes" isn't a duration`},
 		{name: "old images are pruned", mutate: func(_ *testing.T, c *config.Config) { c.Images.Enabled, c.Images.RetainDays = true, 1 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -29,6 +29,7 @@ import (
 	"github.com/retail-cortex/blitz/apps/cli/internal/tui"
 	"github.com/retail-cortex/blitz/pkg/client"
 	"github.com/retail-cortex/blitz/pkg/config"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/loginitem"
 	"github.com/spf13/cobra"
 )
@@ -47,21 +48,22 @@ type workerOps interface {
 }
 
 // openWorkers reaches the workspace's workers in the Blitz service (started
-// when it isn't running), which owns them. close releases what it opened.
-func openWorkers(ctx context.Context, g *globalFlags) (ops workerOps, close func(), err error) {
+// when it isn't running), which owns them. Nothing needs closing: the
+// client holds no connection of its own.
+func openWorkers(ctx context.Context, g *globalFlags) (workerOps, error) {
 	cfg, err := loadConfig(g)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	dir, err := filepath.Abs(config.ExpandHome(cfg.Tools.WorkspaceDir))
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sock, err := ensureService(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return client.AttachWorkers(sock, dir), func() {}, nil
+	return client.AttachWorkers(sock, dir), nil
 }
 
 func newWorkersCommand(g *globalFlags) *cobra.Command {
@@ -137,11 +139,10 @@ main for the service to pick it up (a workspace with sync on does that).`,
 // workersStop stops the running run of the worker named, or the run with
 // that ID.
 func workersStop(cmd *cobra.Command, g *globalFlags, which string) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	runs, err := ops.RunningWorkerRuns()
 	if err != nil {
 		return workerErr(err)
@@ -151,7 +152,7 @@ func workersStop(cmd *cobra.Command, g *globalFlags, which string) error {
 			if err := ops.StopWorkerRun(r.ID); err != nil {
 				return workerErr(err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Stopping %s (run %s).\n", r.Worker, r.ID)
+			fmt.Fprintln(cmd.OutOrStdout(), i18n.T("jobs.stopping", "name", r.Worker, "run", r.ID))
 			return nil
 		}
 	}
@@ -159,14 +160,13 @@ func workersStop(cmd *cobra.Command, g *globalFlags, which string) error {
 }
 
 func workersUndo(cmd *cobra.Command, g *globalFlags, runID string, force bool) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	restored, err := ops.UndoWorkerRun(runID, force)
 	if len(restored) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "Restored %s.\n", strings.Join(restored, ", "))
+		fmt.Fprintln(cmd.OutOrStdout(), i18n.T("jobs.restored", "files", strings.Join(restored, ", ")))
 	}
 	if errors.Is(err, api.ErrUndoConflict) || errors.Is(err, api.ErrNothingToUndo) {
 		return withCode(exitUsage, err)
@@ -175,24 +175,23 @@ func workersUndo(cmd *cobra.Command, g *globalFlags, runID string, force bool) e
 }
 
 func workersList(cmd *cobra.Command, g *globalFlags) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	list, err := ops.ListWorkers()
 	if err != nil {
 		return workerErr(err)
 	}
 	out := cmd.OutOrStdout()
 	if len(list) == 0 {
-		fmt.Fprintln(out, "No jobs: add .agents/workers/<name>/WORKER.md to the workspace.")
+		fmt.Fprintln(out, i18n.T("jobs.none"))
 		return nil
 	}
 	for _, w := range list {
 		next := ""
 		if !w.Next.IsZero() {
-			next = "  next " + w.Next.Local().Format("Mon Jan 2 15:04")
+			next = i18n.T("jobs.next", "time", w.Next.Local().Format("Mon Jan 2 15:04"))
 		}
 		fmt.Fprintf(out, "%-20s %-9s %s (%s)%s\n", w.Name, w.State, w.Schedule, w.Cron, next)
 		if w.Description != "" {
@@ -211,23 +210,39 @@ func describeWorker(out io.Writer, w api.WorkerInfo) {
 	if w.Description != "" {
 		fmt.Fprintf(out, "  %s\n", w.Description)
 	}
-	fmt.Fprintf(out, "  schedule:    %s = %s (%s)\n", w.Schedule, w.Cron, w.Timezone)
+	fmt.Fprintln(out, i18n.T("jobs.describe_schedule", "schedule", w.Schedule, "cron", w.Cron, "timezone", w.Timezone))
 	if w.Agent != "" {
-		fmt.Fprintf(out, "  agent:       %s\n", w.Agent)
+		fmt.Fprintln(out, i18n.T("jobs.describe_agent", "value", w.Agent))
 	}
 	if w.Model != "" {
-		fmt.Fprintf(out, "  model:       %s\n", w.Model)
+		fmt.Fprintln(out, i18n.T("jobs.describe_model", "value", w.Model))
 	}
-	perms := "none (it can read, and write nothing)"
+	perms := i18n.T("jobs.no_permissions")
 	if len(w.Permissions) > 0 {
 		perms = strings.Join(w.Permissions, ", ")
 	}
-	fmt.Fprintf(out, "  may:         %s\n", perms)
-	fmt.Fprintf(out, "  limits:      %d model calls, $%.2f, %s\n", w.Limits.MaxTurns, w.Limits.MaxCostUSD, w.Limits.Timeout)
+	fmt.Fprintln(out, i18n.T("jobs.describe_may", "value", perms))
+	fmt.Fprintln(out, i18n.T("jobs.describe_limits", "value", limitsText(w.Limits)))
 	for _, p := range w.Problems {
 		fmt.Fprintf(out, "  ! %s\n", p)
 	}
-	fmt.Fprintf(out, "  content:     %s\n", w.Hash)
+	fmt.Fprintln(out, i18n.T("jobs.describe_content", "value", w.Hash))
+}
+
+// limitsText says a job's limits, each 0 (none) as "no limit" rather than
+// a limit of nothing (N26 cli-2#24).
+func limitsText(l api.Limits) string {
+	turns, cost, timeout := i18n.T("jobs.no_turn_limit"), i18n.T("jobs.no_cost_limit"), i18n.T("jobs.no_time_limit")
+	if l.MaxTurns > 0 {
+		turns = i18n.T("jobs.model_calls", "count", l.MaxTurns)
+	}
+	if l.MaxCostUSD > 0 {
+		cost = fmt.Sprintf("$%.2f", l.MaxCostUSD)
+	}
+	if l.Timeout > 0 {
+		timeout = l.Timeout.String()
+	}
+	return turns + ", " + cost + ", " + timeout
 }
 
 func findWorker(list []api.WorkerInfo, name string) (api.WorkerInfo, bool) {
@@ -240,11 +255,10 @@ func findWorker(list []api.WorkerInfo, name string) (api.WorkerInfo, bool) {
 }
 
 func workersEnable(cmd *cobra.Command, g *globalFlags, name string, yes bool) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	list, err := ops.ListWorkers()
 	if err != nil {
 		return workerErr(err)
@@ -259,9 +273,9 @@ func workersEnable(cmd *cobra.Command, g *globalFlags, name string, yes bool) er
 	}
 	out := cmd.OutOrStdout()
 	describeWorker(out, w)
-	fmt.Fprintf(out, "\nRead %s before enabling: it runs unattended with the permissions above.\n", w.Path)
+	fmt.Fprintf(out, "\n%s\n", i18n.T("jobs.read_first", "path", w.Path))
 	if !yes {
-		fmt.Fprint(out, "Enable it as shown? [y/N] ")
+		fmt.Fprint(out, i18n.T("jobs.confirm"))
 		answer, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
 		if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
 			return errors.New("not enabled")
@@ -272,36 +286,34 @@ func workersEnable(cmd *cobra.Command, g *globalFlags, name string, yes bool) er
 	if err != nil {
 		return workerErr(err)
 	}
-	next := "when the service runs"
+	next := i18n.T("jobs.when_service_runs")
 	if !on.Next.IsZero() {
 		next = on.Next.Local().Format("Mon Jan 2 15:04")
 	}
-	fmt.Fprintf(out, "✓ %s enabled; next run %s.\n", name, next)
+	fmt.Fprintln(out, i18n.T("jobs.enabled", "name", name, "next", next))
 	if !loginitem.Installed() { // a service started on demand stops when idle
-		fmt.Fprintln(out, "Jobs run in the Blitz service: keep it running with 'blitz service install'.")
+		fmt.Fprintln(out, i18n.T("jobs.service_hint"))
 	}
 	return nil
 }
 
 func workersDisable(cmd *cobra.Command, g *globalFlags, name string) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	if _, err := ops.DisableWorker(name); err != nil {
 		return workerErr(err)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s disabled.\n", name)
+	fmt.Fprintln(cmd.OutOrStdout(), i18n.T("jobs.disabled", "name", name))
 	return nil
 }
 
 func workersRun(cmd *cobra.Command, g *globalFlags, name string) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	out := cmd.OutOrStdout()
 	printer := tui.NewPrinter(tui.PrinterOptions{Out: out})
 	run, err := ops.RunWorker(cmd.Context(), name, printer.Handle)
@@ -317,17 +329,16 @@ func workersRun(cmd *cobra.Command, g *globalFlags, name string) error {
 }
 
 func workersRuns(cmd *cobra.Command, g *globalFlags, name string, limit int) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	runs, err := ops.WorkerRuns(name, limit)
 	if err != nil {
 		return workerErr(err)
 	}
 	if len(runs) == 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "%s hasn't run yet.\n", name)
+		fmt.Fprintln(cmd.OutOrStdout(), i18n.T("jobs.no_runs", "name", name))
 	}
 	for _, r := range runs {
 		printRun(cmd.OutOrStdout(), r)
@@ -336,17 +347,17 @@ func workersRuns(cmd *cobra.Command, g *globalFlags, name string, limit int) err
 }
 
 func printRun(out io.Writer, r api.Run) {
-	how := "scheduled"
+	how := i18n.T("jobs.scheduled")
 	if r.Manual {
-		how = "manual"
+		how = i18n.T("jobs.manual")
 	}
-	fmt.Fprintf(out, "%s  %-9s %s, %s, $%.4f, %d model calls  run %s  session %s\n",
-		r.Started.Local().Format("2006-01-02 15:04"), r.Status, how, r.Duration.Round(time.Second), r.CostUSD, r.Calls, r.ID, r.SessionID)
+	fmt.Fprintln(out, i18n.T("jobs.run_line", "time", r.Started.Local().Format("2006-01-02 15:04"), "status", fmt.Sprintf("%-9s", r.Status), "how", how,
+		"duration", r.Duration.Round(time.Second), "cost", fmt.Sprintf("$%.4f", r.CostUSD), "calls", r.Calls, "run", r.ID, "session", r.SessionID))
 	if len(r.Files) > 0 {
-		fmt.Fprintf(out, "    changed: %s ('blitz jobs undo %s' puts them back)\n", strings.Join(r.Files, ", "), r.ID)
+		fmt.Fprintln(out, i18n.T("jobs.run_changed", "files", strings.Join(r.Files, ", "), "run", r.ID))
 	}
 	for _, f := range r.Refusals {
-		fmt.Fprintf(out, "    refused: %s (%s)\n", f.Detail, f.Tool)
+		fmt.Fprintln(out, i18n.T("jobs.run_refused", "detail", f.Detail, "tool", f.Tool))
 	}
 	if r.Error != "" {
 		fmt.Fprintf(out, "    %s\n", r.Error)
@@ -367,11 +378,10 @@ func workerErr(err error) error {
 // workersMove moves a job to the organization's service (spec_053 EN-40,
 // EN-41), saying what keeps it from running there.
 func workersMove(cmd *cobra.Command, g *globalFlags, name string, anyway bool) error {
-	ops, done, err := openWorkers(cmd.Context(), g)
+	ops, err := openWorkers(cmd.Context(), g)
 	if err != nil {
 		return err
 	}
-	defer done()
 	problems, moved, err := ops.MoveToService(cmd.Context(), name, anyway)
 	if err != nil {
 		return workerErr(err)
@@ -383,6 +393,6 @@ func workersMove(cmd *cobra.Command, g *globalFlags, name string, anyway bool) e
 	if !moved {
 		return withCode(exitFailure, fmt.Errorf("%s stays on this computer: fix what's above, or move it with --anyway", name))
 	}
-	fmt.Fprintf(out, "✓ %s runs on your organization's service now (runs_on: service). Push it to the workspace's main for the service to pick it up.\n", name)
+	fmt.Fprintln(out, i18n.T("jobs.moved", "name", name))
 	return nil
 }

@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/retail-cortex/blitz/pkg/engine/runtime"
 	"github.com/retail-cortex/blitz/pkg/textutil"
@@ -48,13 +47,11 @@ var ErrNothingStaged = errors.New("nothing is staged to commit")
 // ErrEmptyMessage is Commit's error without a message.
 var ErrEmptyMessage = errors.New("a commit needs a message")
 
-// commitTimeout bounds a commit, which runs the repository's hooks.
-const commitTimeout = 2 * time.Minute
-
 // maxCommitDiffChars is how much of the staged diff the model sees.
 const maxCommitDiffChars = 24_000
 
-// commitInstruction asks for a commit message from a staged diff.
+// commitInstruction asks for a commit message from a staged diff. Its 72
+// characters are the desktop commit dialog's subjectLimit (commit.ts).
 const commitInstruction = `You write the git commit message for the staged changes of a software project, on the developer's behalf, from their diff. Reply with the message only: no Markdown fences, no commentary, no quotes around it.
 First line: a summary of what the commit does and why, imperative mood ("Fix", "Add"), at most 72 characters, no trailing period. Follow the style of the recent commit subjects if they show one (a prefix such as "feat:" or "pkg/x:", capitalisation); otherwise plain.
 Then, only if the change needs it, a blank line and a short body (wrapped at 72 characters) saying what changed and why, as plain sentences or "- " bullets. No body for a small, obvious change.
@@ -185,7 +182,12 @@ func (w *Workspace) Commit(ctx context.Context, message string) (hash, subject s
 	if len(files) == 0 {
 		return "", "", ErrNothingStaged
 	}
-	if _, err := w.gitDoFor(ctx, commitTimeout, []byte(message+"\n"), "commit", "-F", "-"); err != nil {
+	// Signing runs gpg.program or gpg.ssh.defaultKeyCommand: not from the
+	// repository's own config, which the agent can write.
+	if err := w.checkRepoConfig(ctx); err != nil {
+		return "", "", err
+	}
+	if _, err := w.gitDoFor(ctx, w.gitLongTimeout(), []byte(message+"\n"), "commit", "-F", "-"); err != nil {
 		return "", "", fmt.Errorf("git commit: %w", err)
 	}
 	out, err := w.gitDo(ctx, nil, "log", "-1", "--format=%h%x00%s")

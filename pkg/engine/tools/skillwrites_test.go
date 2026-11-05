@@ -66,7 +66,7 @@ func writerFixture(t *testing.T, d api.Decision) (string, *SkillScripts, *Checkp
 	ws, err := OpenWorkspace(WorkspaceOptions{Dir: wsDir, BlockedPaths: config.DefaultBlockedPaths})
 	require.NoError(t, err)
 	t.Cleanup(func() { ws.Close() })
-	cps := NewCheckpoints(ws, 0)
+	cps := newTestCheckpoints(ws, 0)
 	hooks, reqs := decisionHooks(d)
 	policy := config.DefaultConfig().Skills.Policy
 	r := NewSkillScripts(prov, policy, ws, hooks, NewPyEnvs(filepath.Join(t.TempDir(), "envs"), policy.Packages),
@@ -108,7 +108,7 @@ func TestScriptWritesWorkspace(t *testing.T) {
 	assert.Equal(t, "<none>", read(t, dir, "gone.txt"))
 	assert.Equal(t, "SECRET=1\n", read(t, dir, ".env"), "a blocked file isn't copied, so it can't change")
 
-	_, err := cps.Undo(false)
+	_, err := cps.Undo("", false)
 	require.NoError(t, err)
 	assert.Equal(t, "original\n", read(t, dir, "README.md"), "/undo reverts the script's changes")
 	assert.Equal(t, "bye\n", read(t, dir, "gone.txt"))
@@ -133,6 +133,6 @@ func TestScriptWritesRefusedOrFailed(t *testing.T) {
 func TestActivateSaysTheSkillWrites(t *testing.T) {
 	_, r, _, _ := writerFixture(t, api.DecisionOnce)
 	p := config.DefaultConfig().Skills.Policy
-	out := runTool(t, toolOf(t)(NewActivateSkillTool(r.provider, &p)), map[string]any{"skill_name": "writer"})
+	out := runTool(t, toolOf(t)(NewActivateSkillTool(r.provider, &p, nil)), map[string]any{"skill_name": "writer"})
 	assert.Equal(t, true, out["writes_workspace"], "%v", out)
 }

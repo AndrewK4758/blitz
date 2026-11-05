@@ -32,6 +32,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/activity"
 	"github.com/retail-cortex/blitz/pkg/config"
 	"github.com/retail-cortex/blitz/pkg/engine"
+	"github.com/retail-cortex/blitz/pkg/engine/tools"
 	"github.com/retail-cortex/blitz/pkg/engine/workers"
 	"github.com/retail-cortex/blitz/pkg/observability"
 	"github.com/retail-cortex/blitz/pkg/service/server"
@@ -56,7 +57,9 @@ type Options struct {
 	IdleExit time.Duration
 	// ExitWith stops the service when it reads to its end: the stdin of
 	// a private service, a pipe from the client that started it, which
-	// closes when that client exits, however it exits. Nil: never.
+	// closes when that client exits, however it exits. Nil: never. When
+	// the service stops first, ExitWith is closed if it's an io.Closer, so
+	// the read waiting on it ends; another reader is read until its end.
 	ExitWith io.Reader
 	// Run are one client's settings for every workspace a private service
 	// opens (the CLI's flags for that run).
@@ -124,6 +127,8 @@ func Run(ctx context.Context, o Options) error {
 	if o.Socket == "" {
 		o.Socket = socket.DefaultSocket()
 	}
+	// The sandbox keeps the model's commands off it (spec_007 SH-23a).
+	tools.GuardSocket(o.Socket)
 	if o.Network != nil {
 		if err := o.Network.check(); err != nil {
 			return err
@@ -239,9 +244,15 @@ func watch(ctx context.Context, stop context.CancelFunc, o Options, idleFor func
 	if o.ExitWith != nil {
 		go func() {
 			_, _ = io.Copy(io.Discard, o.ExitWith)
-			slog.Info("exit: the client that started the service has gone")
+			if ctx.Err() == nil {
+				slog.Info("exit: the client that started the service has gone")
+			}
 			stop()
 		}()
+		// Stopped first (a Shutdown, a signal): the read ends too.
+		if c, ok := o.ExitWith.(io.Closer); ok {
+			context.AfterFunc(ctx, func() { _ = c.Close() })
+		}
 	}
 	if o.IdleExit <= 0 {
 		return

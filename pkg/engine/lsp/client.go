@@ -37,9 +37,9 @@ type Process interface {
 	Stop()
 }
 
-// Launcher starts a server's command in the workspace (the engine's runs it
-// guarded, in the OS sandbox).
-type Launcher func(ctx context.Context, argv []string) (Process, error)
+// Launcher starts a server's command in dir, its project root inside the
+// workspace (the engine's runs it guarded, in the OS sandbox).
+type Launcher func(ctx context.Context, dir string, argv []string) (Process, error)
 
 // conn is a JSON-RPC 2.0 connection over a server's stdio, with LSP's
 // Content-Length framing.
@@ -257,7 +257,12 @@ func (c *conn) call(ctx context.Context, method string, params, out any) error {
 	}
 }
 
-// notify sends a notification.
+// send sends a notification.
 func (c *conn) send(method string, params any) error {
 	return c.write(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+// sendCtx is send, given up when ctx ends (writeCtx).
+func (c *conn) sendCtx(ctx context.Context, method string, params any) error {
+	return c.writeCtx(ctx, map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
 }

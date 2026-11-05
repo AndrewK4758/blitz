@@ -147,11 +147,17 @@ func runOneShot(ctx context.Context, w api.Backend, o oneShotOptions) error {
 			if printer != nil {
 				printer.Begin()
 			}
-			retry, err := w.Run(ctx, sid, api.Turn{
-				Text:   "(json-schema) the answer again, valid against the schema",
-				Prompt: "Your final answer isn't valid against the JSON schema: " + serr.Error() + "\nAnswer again with only the JSON value." + o.schema.instruction(),
-				Plan:   o.plan, MaxTurns: o.maxTurns, MaxCostUSD: o.maxCostUSD, Timeout: o.timeout,
-			}, handler)
+			retry, err := api.TurnResult{}, error(nil)
+			maxTurns, maxCost, timeout, lerr := retryLimits(o, turn, time.Since(start))
+			if lerr != nil {
+				err = lerr
+			} else {
+				retry, err = w.Run(ctx, sid, api.Turn{
+					Text:   "(json-schema) the answer again, valid against the schema",
+					Prompt: "Your final answer isn't valid against the JSON schema: " + serr.Error() + "\nAnswer again with only the JSON value." + o.schema.instruction(),
+					Plan:   o.plan, MaxTurns: maxTurns, MaxCostUSD: maxCost, Timeout: timeout,
+				}, handler)
+			}
 			if printer != nil {
 				printer.End()
 				fmt.Fprintln(out)
@@ -212,7 +218,10 @@ func endRun(ctx context.Context, w api.Backend, o oneShotOptions) {
 	})
 }
 
-// streamJSONHandler writes one JSON line per event.
+// streamJSONHandler writes one JSON line per event (spec_020_cli CLI-21):
+// text, tool calls and results, and (CLI-21a) Blitz's notices, workflow
+// steps and the agent's task list, each a type of its own with every key
+// always present, so a reader that knows only the first three skips them.
 func streamJSONHandler(enc *json.Encoder) func(api.Event) {
 	return func(ev api.Event) {
 		switch {
@@ -222,6 +231,20 @@ func streamJSONHandler(enc *json.Encoder) func(api.Event) {
 			_ = enc.Encode(map[string]any{"type": "tool_call", "name": ev.ToolCall.Name, "args": ev.ToolCall.Args})
 		case ev.ToolResult != nil:
 			_ = enc.Encode(map[string]any{"type": "tool_result", "name": ev.ToolResult.Name, "result": ev.ToolResult.Result})
+		}
+		if n := ev.Notice; n != nil {
+			_ = enc.Encode(map[string]any{"type": "notice", "text": n.Text, "error": n.Error, "transient": n.Transient, "author": ev.Author})
+		}
+		if st := ev.Step; st != nil {
+			_ = enc.Encode(map[string]any{"type": "workflow_step", "workflow": st.Workflow, "id": st.ID, "title": st.Title, "step_type": st.Type,
+				"index": st.Index, "count": st.Count, "status": st.Status, "output": st.Output, "error": st.Error, "run": st.Run})
+		}
+		if ev.Tasks != nil {
+			tasks := make([]map[string]string, len(ev.Tasks))
+			for i, t := range ev.Tasks {
+				tasks[i] = map[string]string{"content": t.Content, "status": t.Status}
+			}
+			_ = enc.Encode(map[string]any{"type": "tasks", "tasks": tasks, "author": ev.Author})
 		}
 	}
 }
@@ -249,4 +272,27 @@ func terminalWidth() int {
 		return w
 	}
 	return 100
+}
+
+// retryLimits are the run's limits left for the --json-schema retry: the
+// first turn's model calls, cost and time count against --max-turns,
+// --max-cost-usd and --timeout, so the two turns together keep to them
+// (N26 cli-2#7). A limit already used up is its limit error (exit 3).
+func retryLimits(o oneShotOptions, first api.TurnResult, elapsed time.Duration) (maxTurns int, maxCost float64, timeout time.Duration, err error) {
+	if o.maxTurns > 0 {
+		if maxTurns = o.maxTurns - (first.After.Calls - first.Before.Calls); maxTurns <= 0 {
+			return 0, 0, 0, fmt.Errorf("%w (%d)", api.ErrMaxTurns, o.maxTurns)
+		}
+	}
+	if o.maxCostUSD > 0 {
+		if maxCost = o.maxCostUSD - (first.After.CostUSD - first.Before.CostUSD); maxCost <= 0 {
+			return 0, 0, 0, fmt.Errorf("%w ($%.2f)", api.ErrCostLimit, o.maxCostUSD)
+		}
+	}
+	if o.timeout > 0 {
+		if timeout = o.timeout - elapsed; timeout <= 0 {
+			return 0, 0, 0, fmt.Errorf("%w (%s)", api.ErrTimeLimit, o.timeout)
+		}
+	}
+	return maxTurns, maxCost, timeout, nil
 }

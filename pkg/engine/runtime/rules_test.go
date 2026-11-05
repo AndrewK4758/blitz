@@ -18,7 +18,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/retail-cortex/blitz/pkg/config"
@@ -76,15 +75,6 @@ func TestScopedRulesArriveWithTheFirstMatchingFile(t *testing.T) {
 	assert.Contains(t, got, "**/*.go", "rendered rule %q", got)
 }
 
-func TestPatchPaths(t *testing.T) {
-	unified := "--- a/src/x.go\t2026-01-01\n+++ b/src/x.go\n@@ -1 +1 @@\n-a\n+b\n--- /dev/null\n+++ b/new.go\n"
-	begin := "*** Begin Patch\n*** Update File: a.go\n*** Move to: b.go\n*** Add File: c.go\n*** Delete File: d.go\n*** End Patch"
-	got := strings.Join(patchPaths(unified), ",")
-	assert.Equal(t, "src/x.go,src/x.go,new.go", got, "unified %q", got)
-	got = strings.Join(patchPaths(begin), ",")
-	assert.Equal(t, "a.go,b.go,c.go,d.go", got, "begin patch %q", got)
-}
-
 func TestToolPaths(t *testing.T) {
 	ws := t.TempDir()
 	real, err := filepath.EvalSymlinks(ws)
@@ -100,6 +90,9 @@ func TestToolPaths(t *testing.T) {
 		{"generate_audio", map[string]any{"text_path": "s.md", "path": "audio/o.wav"}, []string{"s.md", "audio/o.wav"}},
 		{"export_pdf", map[string]any{"markdown": "# x", "output": "summary.pdf"}, []string{"summary.pdf"}},
 		{"list_files", map[string]any{"path": "."}, nil},
+		{"apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Update File: a.go\n*** Move to: b.go\n*** Add File: c.go\n+x\n*** Delete File: d.go\n*** End Patch"},
+			[]string{"a.go", "b.go", "c.go", "d.go"}},
+		{"apply_patch", map[string]any{"patch": "--- a/src/x.go\t2026-01-01\n+++ b/src/x.go\n@@ -1 +1 @@\n-a\n+b\n"}, []string{"src/x.go"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool, func(t *testing.T) {
@@ -114,4 +107,34 @@ func TestToolPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A sub-agent's session ends when it returns: what it was handed isn't
+// kept for good, one entry per call (N26 engine-runtime#21).
+func TestScopedRulesOfASubagentAreForgotten(t *testing.T) {
+	ws := t.TempDir()
+	for name, body := range map[string]string{"a.go": "package a", ".blitz/rules/go.md": "---\npaths: [\"**/*.go\"]\n---\nUse tabs in Go files."} {
+		p := filepath.Join(ws, filepath.FromSlash(name))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+	}
+	rules := memory.LoadAll(ws, config.MemoryConfig{Enabled: true, RuleDirs: []string{".blitz/rules"}}).Rules
+	require.Len(t, rules, 1)
+	read := toolCall("read_file", map[string]any{"path": "a.go"})
+	sub := NewMockLLM("sub", read, textContent("read it"), read, textContent("read it again"))
+	f := newEngineWith(t, fixtureOpts{
+		cfg:  func(c *config.Config) { c.Tools.WorkspaceDir = ws },
+		opts: []Option{WithScopedRules(rules), WithAgentModel("reader", sub)},
+	})
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "reader.md"), []byte("---\nname: reader\ndescription: test\ntools: [read_file]\n---\nRead."), 0o644))
+	require.NoError(t, f.eng.agentReg.LoadExternalAgents(dir))
+	ctx := context.WithValue(context.Background(), runStateKey{}, &runState{sessionID: "s"})
+	for range 2 {
+		_, err := f.eng.InvokeSubagent(ctx, "reader", "read a.go")
+		require.NoError(t, err)
+	}
+	f.eng.scoped.mu.Lock()
+	defer f.eng.scoped.mu.Unlock()
+	assert.Empty(t, f.eng.scoped.given, "sub-agent sessions kept")
 }

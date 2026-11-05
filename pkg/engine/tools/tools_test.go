@@ -59,6 +59,11 @@ func createTestToolContextWith(ctx context.Context) agent.Context {
 
 // --- shared helpers ---
 
+// NewWorkspace opens dir as a single read-write root with no blocked paths.
+func NewWorkspace(dir string, maxFileSize int64) (*Workspace, error) {
+	return OpenWorkspace(WorkspaceOptions{Dir: dir, MaxFileSize: maxFileSize})
+}
+
 func newTestWorkspace(t *testing.T) (*Workspace, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -107,6 +112,12 @@ func approverHooks(approve bool) (*Hooks, *[]api.ApprovalRequest) {
 		d = api.DecisionOnce
 	}
 	return decisionHooks(d)
+}
+
+// newTestCheckpoints attaches an in-memory checkpoint store to ws.
+func newTestCheckpoints(ws *Workspace, maxBytes int64) *Checkpoints {
+	c, _ := OpenCheckpoints(ws, CheckpointOptions{MaxBytes: maxBytes})
+	return c
 }
 
 // decisionHooks records requests and answers with d.

@@ -35,18 +35,38 @@ export interface CommandSpec {
 export const builtins = (): CommandSpec[] =>
   builtinsInOrder().map((b) => ({ name: b.name, args: b.args, description: t(b.describe ?? `desktop.cmd.${b.name}`), source: "builtin", group: b.group }));
 
+/** A workspace's command as ListCommands gives it. */
+export interface ListedCommand {
+  name: string;
+  argumentHint: string;
+  description: string;
+  source: string;
+}
+
+/** The workspace's commands (ListCommands) as the composer and the palette offer them. */
+export const listedCommands = (cs: readonly ListedCommand[]): CommandSpec[] =>
+  cs.map((c) => ({ name: c.name, args: c.argumentHint || undefined, description: c.description || t("desktop.cmd.run", { name: c.name }), source: (c.source || "project") as CommandSpec["source"] }));
+
+/** The window runs on macOS (its shortcuts use ⌘; elsewhere Ctrl). */
+const onMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+
+/** A Cmd/Ctrl shortcut as the platform writes it: ⇧⌘F on macOS, Ctrl+Shift+F elsewhere. */
+export const shortcutLabel = (key: string, shift = false, mac = onMac) => (mac ? `${shift ? "⇧" : ""}⌘${key}` : `Ctrl+${shift ? "Shift+" : ""}${key}`);
+
 /** A composer line as a command, or undefined when it isn't one. */
 export function parseCommand(line: string): { name: string; args: string } | undefined {
   const t = line.trim();
   if (!t.startsWith("/") || t.startsWith("//")) return undefined;
-  // Names are letters, digits, "-", "_", ":" and "."; "/usr/bin …" is a path.
-  const m = /^\/([A-Za-z][\w:.-]*)(?:\s+([\s\S]*))?$/.exec(t);
+  // Names are letters, digits, "-", "_", ":" and ".", a digit first too
+  // (/3d-render), as the engine's commands.validName; "/usr/bin …" is a path.
+  const m = /^\/([A-Za-z0-9][\w:.-]*)(?:\s+([\s\S]*))?$/.exec(t);
   if (!m) return undefined;
   const name = m[1].toLowerCase();
   const args = (m[2] ?? "").trim();
   // /skills update, /agents update and /rules update are the bundled
-  // /skills-update, /agents-update and /rules-update (the engine reads
-  // them the same way).
+  // /skills-update, /agents-update and /rules-update, as the engine's
+  // commands.Alias reads them: the page needs the name to find the
+  // command before it sends the line.
   const update = /^update(?:\s+([\s\S]*))?$/i.exec(args);
   if ((name === "skills" || name === "agents" || name === "rules") && update) return { name: `${name}-update`, args: (update[1] ?? "").trim() };
   if (name === "set") return { name: "config", args }; // the terminal's other name for it
@@ -73,7 +93,7 @@ export function matchCommands(draft: string, all: CommandSpec[]): CommandSpec[] 
  * tiles, Set up this workspace): known before, or without, the service's
  * list, which a workspace still opening may not have sent yet.
  */
-export const engineCommands: ReadonlySet<string> = new Set(["setup", "reflect", "skills-update", "agents-update", "rules-update"]);
+const engineCommands: ReadonlySet<string> = new Set(["setup", "reflect", "skills-update", "agents-update", "rules-update"]);
 
 /** Whether name is a command: one in all, or one of the engine's own. */
 export function knownCommand(name: string, all: CommandSpec[]): boolean {

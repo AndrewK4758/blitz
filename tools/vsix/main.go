@@ -22,13 +22,13 @@ package main
 
 import (
 	"archive/zip"
+	"cmp"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
-	"mime"
 	"os"
 	"path"
 	"path/filepath"
@@ -220,7 +220,7 @@ func vsixManifest(m manifest, entries []entry) ([]byte, error) {
 	d.Version, d.NS = "2.0.0", "http://schemas.microsoft.com/developer/vsx-schema/2011"
 	md := &d.Metadata
 	md.Identity.Language, md.Identity.ID, md.Identity.Version, md.Identity.Publisher = "en-US", m.Name, m.Version, m.Publisher
-	md.DisplayName = cmpOr(m.DisplayName, m.Name)
+	md.DisplayName = cmp.Or(m.DisplayName, m.Name)
 	md.Description.Space, md.Description.Text = "preserve", m.Description
 	md.Categories = strings.Join(m.Categories, ",")
 	md.GalleryFlags = "Public"
@@ -250,26 +250,34 @@ func vsixManifest(m manifest, entries []entry) ([]byte, error) {
 	return append([]byte(xml.Header), b...), nil
 }
 
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
+// knownTypes are the media types of the extensions an extension ships.
+// They're fixed here, not the host's (mime.TypeByExtension reads the
+// system's tables, which differ between machines), so builds match.
+var knownTypes = map[string]string{
+	".vsixmanifest": "text/xml",
+	".json":         "application/json",
+	".js":           "application/javascript",
+	".mjs":          "application/javascript",
+	".map":          "application/json",
+	".md":           "text/markdown",
+	".txt":          "text/plain",
+	".html":         "text/html",
+	".css":          "text/css",
+	".png":          "image/png",
+	".svg":          "image/svg+xml",
+	".woff2":        "font/woff2",
+	".wasm":         "application/wasm",
 }
 
 // contentTypes is [Content_Types].xml: a type for each file extension.
 func contentTypes(entries []entry) []byte {
-	types := map[string]string{".vsixmanifest": "text/xml", ".json": "application/json"}
+	types := map[string]string{".vsixmanifest": knownTypes[".vsixmanifest"], ".json": knownTypes[".json"]}
 	for _, e := range entries {
 		ext := strings.ToLower(path.Ext(e.name))
 		if ext == "" || types[ext] != "" {
 			continue
 		}
-		t := mime.TypeByExtension(ext)
-		if i := strings.IndexByte(t, ';'); i >= 0 {
-			t = t[:i]
-		}
-		types[ext] = cmpOr(t, "application/octet-stream")
+		types[ext] = cmp.Or(knownTypes[ext], "application/octet-stream")
 	}
 	exts := make([]string, 0, len(types))
 	for ext := range types {

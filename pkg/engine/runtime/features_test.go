@@ -49,6 +49,8 @@ func TestUsageEstimate(t *testing.T) {
 	u = tr.Estimate("unknown-model", m, 0)
 	assert.False(t, u.Priced, "unknown model should be unpriced: %+v", u)
 	assert.Equal(t, float64(0), u.CostUSD, "unknown model should be unpriced: %+v", u)
+	u = tr.Estimate("gemini-3.8-flash", nil, 0) // no usage reported: unknown cost
+	assert.Equal(t, api.Usage{Calls: 1}, u, "a call without usage should be one unpriced call")
 
 	tr.Record("s", "gemini-3.8-flash", m)
 	tr.Record("s", "gemini-3.8-flash", &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 10})
@@ -121,6 +123,17 @@ func functionResponses(t *testing.T, eng *Engine, sid, prompt string, opts ...Ex
 	return out, err
 }
 
+// An answer without usage is still a call, of unknown cost: /cost
+// doesn't show an exact-looking $0.00 (N26 engine-runtime#6).
+func TestEngineRecordsACallWithoutUsage(t *testing.T) {
+	f := newEngineWith(t, fixtureOpts{}, textContent("hi"))
+	_, err := collect(t, f.eng, "s1", "hello")
+	require.NoError(t, err)
+	u := f.eng.Usage("s1")
+	assert.Equal(t, 1, u.Calls, "usage %+v", u)
+	assert.False(t, u.Priced, "usage %+v", u)
+}
+
 func TestEngineRecordsUsage(t *testing.T) {
 	f := newEngineWith(t, fixtureOpts{}, textContent("hi"))
 	f.llm.Usage = &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 1000, CandidatesTokenCount: 200}
@@ -148,6 +161,47 @@ func TestEngineMaxTurns(t *testing.T) {
 	g := newEngineWith(t, fixtureOpts{}, toolCall("list_files", map[string]any{}), textContent("done"))
 	_, err = functionResponses(t, g.eng, "s", "once", WithMaxTurns(5))
 	assert.NoError(t, err, "run within limit failed")
+}
+
+// TestBudgetSpansRuns: runs that share a budget count their model calls
+// together, and a budget within another stops at whichever runs out first.
+func TestBudgetSpansRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		own, outer    int
+		calls         int  // the first run's calls, all within the budgets
+		ownExhausted  bool // the second run is stopped by the budget's own limit
+		secondAllowed int  // model calls the second run makes before it's stopped
+	}{
+		{name: "one budget", own: 3, calls: 2, ownExhausted: true, secondAllowed: 1},
+		{name: "the outer budget runs out first", own: 10, outer: 3, calls: 2, secondAllowed: 1},
+		{name: "the own budget runs out first", own: 3, outer: 10, calls: 2, ownExhausted: true, secondAllowed: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var contents []*genai.Content
+			for i := 0; i < tc.calls-1; i++ {
+				contents = append(contents, toolCall("list_files", map[string]any{}))
+			}
+			contents = append(contents, textContent("done"))
+			for i := 0; i < 6; i++ {
+				contents = append(contents, toolCall("list_files", map[string]any{}))
+			}
+			f := newEngineWith(t, fixtureOpts{}, contents...)
+			var outer *Budget
+			if tc.outer > 0 {
+				outer = NewBudget(tc.outer, nil)
+			}
+			b := NewBudget(tc.own, outer)
+			_, err := functionResponses(t, f.eng, "s", "first", WithBudget(b))
+			require.NoError(t, err)
+			require.Equal(t, tc.calls, f.llm.Calls())
+			_, err = functionResponses(t, f.eng, "s", "second", WithBudget(b))
+			require.ErrorIs(t, err, api.ErrMaxTurns)
+			assert.Equal(t, tc.calls+tc.secondAllowed, f.llm.Calls(), "the second run's calls count after the first's")
+			assert.Equal(t, tc.ownExhausted, b.Exhausted())
+			assert.Equal(t, tc.outer > 0 && !tc.ownExhausted, outer.Exhausted())
+		})
+	}
 }
 
 func TestEngineResumesPersistedSession(t *testing.T) {
@@ -221,7 +275,6 @@ func TestEngineAuditsToolCalls(t *testing.T) {
 	f.tools.SetAudit(log)
 	_, err := functionResponses(t, f.eng, "s", "list")
 	require.NoError(t, err)
-	log.Close()
 	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	require.Len(t, files, 1, "audit files %v", files)
 	b, _ := os.ReadFile(files[0])
@@ -245,7 +298,6 @@ func TestEngineAuditsWhatFailed(t *testing.T) {
 	f.tools.SetAudit(log)
 	_, err := functionResponses(t, f.eng, "s", "go")
 	require.NoError(t, err)
-	log.Close()
 	results := map[string]audit.Entry{}
 	for _, e := range audit.Read(dir, "", time.Now().Add(-time.Hour)) {
 		if e.Kind == audit.KindToolResult {

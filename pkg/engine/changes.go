@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"slices"
 	"strings"
 	"time"
 
@@ -43,13 +42,23 @@ func (w *Workspace) ListCheckpoints() []api.Checkpoint {
 	return out
 }
 
-// Undo restores the files the latest turn with changes modified, and
-// audits it. A partial restore returns both what was restored and why the
-// rest wasn't.
-func (w *Workspace) Undo(force bool) (api.UndoResult, error) {
-	res, err := w.tools.Checkpoints().Undo(force)
+// Undo restores the files session's latest turn with changes modified
+// ("": the active session's), counting its sub-agents' and tasks', and
+// audits it. Other sessions' turns are left alone, even when the session
+// has nothing to undo. A partial restore returns both what was restored
+// and why the rest wasn't.
+func (w *Workspace) Undo(session string, force bool) (api.UndoResult, error) {
+	if session == "" {
+		if active := w.storage.Active(); active != nil {
+			session = active.ID
+		}
+	}
+	if session == "" {
+		return api.UndoResult{}, errNothingToUndoHere
+	}
+	res, err := w.tools.Checkpoints().Undo(session, force)
 	if errors.Is(err, tools.ErrNothingToUndo) {
-		return api.UndoResult{}, api.ErrNothingToUndo // the API's, which the service maps
+		return api.UndoResult{}, errNothingToUndoHere // the API's, which the service maps
 	}
 	out := api.UndoResult{Label: res.Turn.Label, Restored: res.Restored}
 	if len(res.Restored) > 0 {
@@ -57,6 +66,10 @@ func (w *Workspace) Undo(force bool) (api.UndoResult, error) {
 	}
 	return out, err
 }
+
+// errNothingToUndoHere is /undo's answer when the chat it ran from changed
+// nothing it can still restore, whatever other chats changed.
+var errNothingToUndoHere = fmt.Errorf("%w in this chat", api.ErrNothingToUndo)
 
 // UndoWorkerRun restores the files worker run runID changed, as they were
 // before it (BL-WK-02), with /undo's conflict rules.
@@ -97,11 +110,10 @@ func (w *Workspace) GitDiff(ctx context.Context, color bool) (string, error) {
 	if color {
 		ui = "always"
 	}
-	base := []string{"-c", "color.ui=" + ui, "-c", "core.fsmonitor=false"}
-	base = append(base, noFilters(ctx, w.Dir())...)
 	git := func(args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "git", append(slices.Clone(base), args...)...)
+		cmd := exec.CommandContext(ctx, "git", gitArgs(ctx, w.Dir(), false, append([]string{"-c", "color.ui=" + ui}, args...)...)...)
 		cmd.Dir = w.Dir()
+		cmd.Env = gitEnv()
 		return cmd.CombinedOutput()
 	}
 	// Against the last commit; before the first, against an empty tree.
@@ -149,10 +161,11 @@ func (w *Workspace) GitStatus(ctx context.Context) (api.GitStatus, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	base := append([]string{"-c", "core.fsmonitor=false", "--no-optional-locks"}, noFilters(ctx, w.Dir())...)
+	filters := noFilters(ctx, w.Dir()) // once for the status's calls
 	git := func(args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "git", append(slices.Clone(base), args...)...)
+		cmd := exec.CommandContext(ctx, "git", append(append([]string{"-c", "core.fsmonitor=false"}, filters...), args...)...)
 		cmd.Dir = w.Dir()
+		cmd.Env = gitEnv()
 		return cmd.Output()
 	}
 	st := api.GitStatus{Git: true}

@@ -31,12 +31,14 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/retail-cortex/blitz/pkg/api"
 	"github.com/retail-cortex/blitz/pkg/textutil"
 
 	"github.com/retail-cortex/blitz/pkg/config"
+	"github.com/retail-cortex/blitz/pkg/engine/flows"
 	"github.com/retail-cortex/blitz/pkg/engine/runtime"
 	"github.com/retail-cortex/blitz/pkg/engine/session"
 	"github.com/retail-cortex/blitz/pkg/engine/tools"
@@ -90,7 +92,7 @@ func (w *Workspace) workerRoots() []string {
 func (w *Workspace) discoverWorkers() map[string]workers.Found {
 	out := map[string]workers.Found{}
 	for _, root := range w.workerRoots() {
-		list, err := workers.Discover(root)
+		list, err := workers.Discover(w.ProjectWorkflowsDir(), root)
 		if err != nil {
 			w.warn(err.Error())
 		}
@@ -120,7 +122,8 @@ func (w *Workspace) workerInfo(wk *workers.Worker, loadErr error, now time.Time)
 		info.Problems = []string{loadErr.Error()}
 	}
 	if loadErr == nil {
-		eff := workers.Apply(wk, w.workerPolicy())
+		f, ok := w.jobWorkflow(wk)
+		eff := workers.Apply(withFlowGrants(wk, f, ok), w.workerPolicy())
 		for _, p := range eff.Permissions {
 			info.Permissions = append(info.Permissions, p.String())
 		}
@@ -169,7 +172,7 @@ func (w *Workspace) CreateWorker(spec api.WorkerSpec) (api.WorkerInfo, []string,
 	if err := os.WriteFile(filepath.Join(dir, workers.FileName), data, 0o644); err != nil {
 		return api.WorkerInfo{}, nil, err
 	}
-	wk, err := workers.Load(dir)
+	wk, err := workers.Load(dir, w.ProjectWorkflowsDir())
 	return w.workerInfo(wk, err, time.Now()), nil, nil
 }
 
@@ -231,7 +234,7 @@ func (w *Workspace) checkWorker(spec api.WorkerSpec, data []byte) ([]string, err
 		return nil, err
 	}
 	var problems []string
-	if _, err := workers.Load(check); err != nil {
+	if _, err := workers.Load(check, w.ProjectWorkflowsDir()); err != nil {
 		var invalid *workers.InvalidError
 		if !errors.As(err, &invalid) {
 			return nil, err
@@ -270,7 +273,7 @@ func (w *Workspace) GetWorkerSpec(name string) (api.WorkerSpec, string, error) {
 	if err != nil {
 		return api.WorkerSpec{}, "", err
 	}
-	return workers.ReadSpec(dir)
+	return workers.ReadSpec(dir, w.ProjectWorkflowsDir())
 }
 
 // UpdateWorker rewrites a worker's WORKER.md from spec, if its files still
@@ -285,7 +288,7 @@ func (w *Workspace) UpdateWorker(spec api.WorkerSpec, hash string) (api.WorkerIn
 	if err != nil {
 		return api.WorkerInfo{}, nil, err
 	}
-	if now, err := workers.HashDir(dir); err != nil {
+	if now, err := workers.HashDir(dir, w.ProjectWorkflowsDir()); err != nil {
 		return api.WorkerInfo{}, nil, err
 	} else if now != hash {
 		return api.WorkerInfo{}, nil, fmt.Errorf("%w: edited %s, now %s", api.ErrHashMismatch, hash, now)
@@ -299,7 +302,7 @@ func (w *Workspace) UpdateWorker(spec api.WorkerSpec, hash string) (api.WorkerIn
 	if err := writeFileAtomic(filepath.Dir(dir), filepath.Join(dir, workers.FileName), data); err != nil {
 		return api.WorkerInfo{}, nil, err
 	}
-	wk, err := workers.Load(dir)
+	wk, err := workers.Load(dir, w.ProjectWorkflowsDir())
 	return w.workerInfo(wk, err, time.Now()), nil, nil
 }
 
@@ -329,6 +332,12 @@ func writeFileAtomic(tmpDir, path string, data []byte) error {
 // ListWorkers returns the workspace's workers, by name.
 func (w *Workspace) ListWorkers() ([]api.WorkerInfo, error) {
 	w.RefreshAgents(context.Background()) // a worker's agent may be new
+	return w.listWorkers()
+}
+
+// listWorkers is ListWorkers without reading the agent files again (the
+// health page asks every few seconds; a turn or a listing reads them).
+func (w *Workspace) listWorkers() ([]api.WorkerInfo, error) {
 	if !w.cfg.Workers.Enabled {
 		return nil, api.ErrWorkersDisabled
 	}
@@ -355,7 +364,7 @@ func (w *Workspace) worker(name string) (*workers.Worker, error, error) {
 	}
 	for _, root := range w.workerRoots() {
 		dir := filepath.Join(root, name)
-		wk, loadErr := workers.Load(dir)
+		wk, loadErr := workers.Load(dir, w.ProjectWorkflowsDir())
 		if wk != nil {
 			return wk, loadErr, nil
 		}
@@ -415,12 +424,6 @@ const unattendedPreamble = "You are running unattended as the scheduled worker %
 // workerTitlePrefix starts a worker run's session title.
 const workerTitlePrefix = "⏰ "
 
-// RunWorker runs the named worker once, now, and records the run. The
-// worker must be enabled at its current hash. The run has a session of its
-// own (not the workspace's active one), gets exactly the worker's
-// permissions after the host policy (anything else is refused and
-// recorded), and stops at its limits. on receives the turn's events.
-// A run of the same worker still going makes this ErrRunInProgress.
 // RunOptions configure RunWorker.
 type RunOptions struct {
 	// Manual means the run started on request rather than by the schedule.
@@ -439,10 +442,36 @@ type RunOptions struct {
 	Session, Prompt string
 }
 
+// withFlowGrants is wk with, for a workflow's job, what the workflow's
+// steps do (flows.SchedulePermissions, WF-20) added to its own
+// permissions: the grants follow the workflow, never a copy made when its
+// schedule was added. f is the workflow as wk's hash covers it
+// (jobWorkflow; ok false: none), so a run's grants are those of the steps
+// it runs, never of an edit made after its hash was checked (WK-05b). The
+// policy then applies to them all.
+func withFlowGrants(wk *workers.Worker, f flows.Flow, ok bool) *workers.Worker {
+	if !ok {
+		return wk
+	}
+	c := *wk
+	c.Permissions = slices.Clone(wk.Permissions)
+	for _, g := range flows.SchedulePermissions(f) {
+		if p, err := workers.ParsePermission(g); err == nil && !slices.Contains(c.Permissions, p) {
+			c.Permissions = append(c.Permissions, p)
+		}
+	}
+	return &c
+}
+
+// afterJobCheck runs once a job's hash has been checked, at a run's start
+// and when a paused run resumes; tests change the job's files in it.
+var afterJobCheck = func() {}
+
 // RunWorker runs the named worker once, as its schedule would: in a
 // session of its own, with only the permissions it declares and within its
 // limits, recorded in the run log. The worker must be enabled; a
-// scheduled run of one that isn't is recorded as skipped.
+// scheduled run of one that isn't is recorded as skipped. A run of the
+// same worker still going makes this ErrRunInProgress.
 func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (api.Run, error) {
 	w.RefreshAgents(ctx)
 	wk, loadErr, err := w.worker(name)
@@ -452,13 +481,19 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 	if state := w.workerStore.State(w.Dir(), wk, loadErr); state != api.StateEnabled {
 		return api.Run{}, fmt.Errorf("%w (it is %s)", api.ErrWorkerNotEnabled, state)
 	}
+	// From here on the job is what it was when its hash was checked: its
+	// workflow's steps and their grants come from the bytes hashed
+	// (wk.FlowFile), not from the file again (WK-05b).
+	afterJobCheck()
 	w.runsMu.Lock()
 	if w.running[name] {
 		w.runsMu.Unlock()
 		skipped := api.Run{ID: newRunID(), Workspace: w.Dir(), Worker: name, Hash: wk.Hash, Status: api.RunSkipped,
 			Manual: o.Manual, Started: time.Now(), Error: api.ErrRunInProgress.Error()}
 		if !o.Manual { // a scheduled run that couldn't happen is worth a record
-			w.runLog.Append(skipped)
+			if err := w.runLog.Append(skipped); err != nil {
+				w.warn("recording the worker run: " + err.Error())
+			}
 			w.notifyRun(skipped)
 		}
 		return skipped, api.ErrRunInProgress
@@ -471,7 +506,10 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 		w.runsMu.Unlock()
 	}()
 
-	eff := workers.Apply(wk, w.workerPolicy())
+	policy := w.workerPolicy()
+	flow, hasFlow := w.jobWorkflow(wk)
+	eff := workers.Apply(withFlowGrants(wk, flow, hasFlow), policy)
+	hints := w.jobLimitHints(wk, policy)
 	agent := cmp.Or(wk.Agent, w.engine.ActiveAgent())
 	run := api.Run{ID: newRunID(), Workspace: w.Dir(), Worker: name, Hash: wk.Hash, Status: api.RunRunning, Manual: o.Manual, Started: time.Now()}
 
@@ -538,18 +576,38 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 	case wk.Flow != "":
 		// A workflow (WF-17): its steps run under the worker's permissions,
 		// in its run's chat, the prompt as its input.
-		f, ok := w.workflow(wk.Flow)
-		if !ok {
+		f := flow
+		if !hasFlow {
 			runErr = fmt.Errorf("there's no workflow %q", wk.Flow)
 			break
 		}
-		fctx := withFlowOrigin(withFlowStorage(runCtx, st), "worker")
+		// Its steps are the run's: within its limits, on its agent and
+		// model, their changes its checkpoint (WK-43, WK-54).
+		job := &jobRun{id: run.ID, agent: wk.Agent, opts: opts, limits: hints, budget: runtime.NewBudget(eff.Limits.MaxTurns, nil)}
+		fctx, cancel := context.WithCancelCause(withJobRun(withFlowOrigin(withFlowStorage(runCtx, st), "worker"), job))
+		defer cancel(nil)
 		if eff.Limits.Timeout > 0 {
-			var cancel context.CancelFunc
-			fctx, cancel = context.WithTimeout(fctx, eff.Limits.Timeout)
-			defer cancel()
+			var stop context.CancelFunc
+			fctx, stop = context.WithTimeoutCause(fctx, eff.Limits.Timeout, fmt.Errorf("%w (%s)", api.ErrTimeLimit, eff.Limits.Timeout))
+			defer stop()
 		}
-		_, runErr = w.runFlow(fctx, rec.ID, f, wk.Prompt, on)
+		flowOn := on
+		if max := eff.Limits.MaxCostUSD; max > 0 {
+			spent := w.costSince(rec.ID, w.engine.Usage(rec.ID).CostUSD)
+			flowOn = func(e api.Event) {
+				on(e)
+				if spent() > max {
+					job.costHit.Store(true)
+					cancel(fmt.Errorf("%w ($%.2f)", api.ErrCostLimit, max))
+				}
+			}
+		}
+		_, runErr = w.runFlow(fctx, rec.ID, f, wk.Prompt, flowOn)
+		if cause := context.Cause(fctx); runErr != nil && api.IsLimit(cause) {
+			// Stopped by the run's time or cost limit: said as that limit,
+			// with what set it.
+			runErr = w.limitSource(cause, turnLimits{}, false, hints)
+		}
 	default:
 		text, prompt := wk.Prompt, fmt.Sprintf(unattendedPreamble, name)+wk.Prompt
 		if o.Prompt != "" {
@@ -558,7 +616,7 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 		_, runErr = w.run(runCtx, rec.ID, turn{Turn: api.Turn{
 			Text: text, Prompt: prompt,
 			MaxTurns: eff.Limits.MaxTurns, MaxCostUSD: eff.Limits.MaxCostUSD, Timeout: eff.Limits.Timeout,
-		}, run: run.ID}, on, st, opts...)
+		}, run: run.ID, limits: hints, agent: wk.Agent}, on, st, opts...)
 	}
 
 	w.auditTurnEnd(rec.ID, runErr)
@@ -585,6 +643,50 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 		w.notifyRun(run)
 	}
 	return run, nil
+}
+
+// jobRun is the job's run a workflow's steps are part of (spec_023
+// WK-43): each agent step's turn is the run's (its changes go into the
+// run's checkpoint), on the job's agent and model unless the step names
+// its own, and its model calls count toward the run's budget.
+type jobRun struct {
+	id     string
+	agent  string               // the job's agent ("": the active one)
+	opts   []runtime.ExecOption // the job's agent and model
+	limits limitHints
+	budget *runtime.Budget
+	// costHit is set once the run's spend passed its max_cost_usd.
+	costHit atomic.Bool
+}
+
+type jobRunKey struct{}
+
+// withJobRun is ctx running the steps of job's workflow.
+func withJobRun(ctx context.Context, job *jobRun) context.Context {
+	return context.WithValue(ctx, jobRunKey{}, job)
+}
+
+// jobRunFrom is the job's run ctx's workflow steps are part of (nil: none).
+func jobRunFrom(ctx context.Context) *jobRun {
+	job, _ := ctx.Value(jobRunKey{}).(*jobRun)
+	return job
+}
+
+// turnBudget is the run's model-call budget (nil without a run).
+func (j *jobRun) turnBudget() *runtime.Budget {
+	if j == nil {
+		return nil
+	}
+	return j.budget
+}
+
+// stoppedRun reports whether err is the run reaching its own limit, not
+// the step's turn reaching the turn's.
+func (j *jobRun) stoppedRun(err error) bool {
+	if j == nil {
+		return false
+	}
+	return errors.Is(err, api.ErrMaxTurns) && j.budget.Exhausted() || errors.Is(err, api.ErrCostLimit) && j.costHit.Load()
 }
 
 // runFailed records run as failed with err before it started, and tells

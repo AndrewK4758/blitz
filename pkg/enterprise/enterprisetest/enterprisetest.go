@@ -21,6 +21,7 @@
 package enterprisetest
 
 import (
+	"cmp"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -184,6 +185,9 @@ type Service struct {
 	Refreshes int
 	SignIns   []string // the client each sign-in named
 	Offline   bool
+	// ListDown makes listing the workspaces fail (503), as a service
+	// that's slow or restarting does; set with Mu held.
+	ListDown  bool
 	Tokenless bool // a sign-in or a run's token answered without tokens
 	// Key signs the branding; Branding is what it serves (none when nil),
 	// and Terms the version in force, accepted or not, by person.
@@ -191,7 +195,7 @@ type Service struct {
 	KeyID    string
 	Branding map[string]any
 	Version  string
-	Accepts  map[string]bool
+	accepts  map[string]bool
 	// Forged signs the branding and catalog with a key the service
 	// doesn't publish.
 	Forged bool
@@ -227,6 +231,9 @@ type Service struct {
 	// refuses them all, as a service without a store does.
 	Kept        map[string]map[string]Artifact
 	KeepRefused bool
+	// MaxRunFiles is how many files the service keeps a run, a new one
+	// past it refused (blitz-enterprise's jobs.MaxRunFiles, 1,000, when 0).
+	MaxRunFiles int
 	// ServiceJobs are the jobs the service runs (GET /api/v1/jobs);
 	// ServiceRuns their runs, by job ID, newest first; Files the files
 	// under each resource name, and Contents each file's, by its name.
@@ -326,7 +333,7 @@ type Artifact struct {
 // gateway and jobs, and signs Ana (ana@acme.com) in.
 func NewService(t testing.TB, issuer string) *Service {
 	_, key, _ := ed25519.GenerateKey(nil)
-	s := &Service{Key: key, KeyID: "catalog-test", Accepts: map[string]bool{}, Announce: make(chan int, 4), quit: make(chan struct{}), Workspaces: map[string]Workspace{}, Runs: map[string]string{}, repos: t.TempDir(), Pushes: make(chan string, 4), RunChanges: make(chan RunChange, 4), EndRunStreams: make(chan struct{}, 4), issuer: issuer, sessions: map[string]string{}, Ended: map[string]bool{}, Access: map[string]string{}, ExpiresIn: 600}
+	s := &Service{Key: key, KeyID: "catalog-test", accepts: map[string]bool{}, Announce: make(chan int, 4), quit: make(chan struct{}), Workspaces: map[string]Workspace{}, Runs: map[string]string{}, repos: t.TempDir(), Pushes: make(chan string, 4), RunChanges: make(chan RunChange, 4), EndRunStreams: make(chan struct{}, 4), issuer: issuer, sessions: map[string]string{}, Ended: map[string]bool{}, Access: map[string]string{}, ExpiresIn: 600}
 	refuse := func(w http.ResponseWriter, status int, code, msg string) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "message": msg})
@@ -426,7 +433,7 @@ func NewService(t testing.TB, issuer string) *Service {
 		if s.Forged {
 			_, key, _ = ed25519.GenerateKey(nil)
 		}
-		env := Seal(s.KeyID, key, br)
+		env := seal(s.KeyID, key, br)
 		sum := sha256.Sum256(env)
 		etag := `"` + base64.RawURLEncoding.EncodeToString(sum[:9]) + `"`
 		w.Header().Set("ETag", etag)
@@ -471,7 +478,7 @@ func NewService(t testing.TB, issuer string) *Service {
 		if s.Forged {
 			_, key, _ = ed25519.GenerateKey(nil)
 		}
-		env := Seal(s.KeyID, key, m)
+		env := seal(s.KeyID, key, m)
 		sum := sha256.Sum256(env)
 		etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 		w.Header().Set("ETag", etag)
@@ -531,6 +538,10 @@ func NewService(t testing.TB, issuer string) *Service {
 		}
 		s.Mu.Lock()
 		defer s.Mu.Unlock()
+		if s.ListDown {
+			refuse(w, http.StatusServiceUnavailable, "unavailable", "")
+			return
+		}
 		handles := make([]string, 0, len(s.Workspaces))
 		for h := range s.Workspaces {
 			handles = append(handles, h)
@@ -624,7 +635,7 @@ func NewService(t testing.TB, issuer string) *Service {
 			refuse(w, http.StatusUnauthorized, "unauthenticated", "Sign in first.")
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"version": s.Version, "accepted": s.Version == "" || s.Accepts[session+s.Version],
+		_ = json.NewEncoder(w).Encode(map[string]any{"version": s.Version, "accepted": s.Version == "" || s.accepts[session+s.Version],
 			"text": "Be kind.", "url": ""})
 	})
 	mux.HandleFunc("POST /api/v1/terms/accept", func(w http.ResponseWriter, r *http.Request) {
@@ -641,7 +652,7 @@ func NewService(t testing.TB, issuer string) *Service {
 		case in.Version != s.Version:
 			refuse(w, http.StatusConflict, "conflict", "That isn't the version of the terms in force: fetch it again.")
 		default:
-			s.Accepts[session+in.Version] = true
+			s.accepts[session+in.Version] = true
 			w.WriteHeader(http.StatusNoContent)
 		}
 	})
@@ -1039,6 +1050,10 @@ func NewService(t testing.TB, issuer string) *Service {
 		if s.Kept[id] == nil {
 			s.Kept[id] = map[string]Artifact{}
 		}
+		if _, again := s.Kept[id][r.PathValue("path")]; !again && len(s.Kept[id]) >= cmp.Or(s.MaxRunFiles, 1000) {
+			refuse(w, http.StatusRequestEntityTooLarge, "too_many", fmt.Sprintf("A run keeps at most %d files.", cmp.Or(s.MaxRunFiles, 1000)))
+			return
+		}
 		s.Kept[id][r.PathValue("path")] = Artifact{MediaType: r.Header.Get("Content-Type"), Body: string(body)}
 		w.WriteHeader(http.StatusCreated)
 	})
@@ -1072,10 +1087,10 @@ func Browse(t testing.TB) func(string) {
 	}
 }
 
-// Seal signs v as the service does: its JSON in base64url, signed with
+// seal signs v as the service does: its JSON in base64url, signed with
 // Ed25519 over "blitz-enterprise/v1", NUL, the key's ID, NUL and the
 // payload.
-func Seal(kid string, key ed25519.PrivateKey, v any) []byte {
+func seal(kid string, key ed25519.PrivateKey, v any) []byte {
 	payload, _ := json.Marshal(v)
 	signed := append([]byte("blitz-enterprise/v1\x00"+kid+"\x00"), payload...)
 	env, _ := json.Marshal(map[string]string{"kid": kid, "payload": base64.RawURLEncoding.EncodeToString(payload),

@@ -118,12 +118,6 @@ type Checkpoints struct {
 	collect  bool // turns were dropped: remove unused blobs at the next save
 }
 
-// NewCheckpoints attaches an in-memory checkpoint store to ws.
-func NewCheckpoints(ws *Workspace, maxBytes int64) *Checkpoints {
-	c, _ := OpenCheckpoints(ws, CheckpointOptions{MaxBytes: maxBytes})
-	return c
-}
-
 // OpenCheckpoints attaches a checkpoint store to ws, loading what an
 // earlier process persisted in o.Dir. When the index can't be loaded
 // (unreadable, from a newer Blitz, or damaged, which is set aside), the
@@ -408,16 +402,21 @@ func summarize(t *Turn) TurnSummary {
 	return s
 }
 
-// Undo reverts the most recent turn that changed files. Unless force is set,
-// it refuses when a file no longer matches what the tools wrote, so edits
-// made afterwards (by the shell or the user) aren't silently discarded.
-func (c *Checkpoints) Undo(force bool) (UndoResult, error) {
+// Undo reverts session's most recent turn that changed files ("": the
+// workspace's, whichever session made it); other sessions' turns are left
+// alone. Unless force is set, it refuses when a file no longer matches what
+// the tools wrote, so edits made afterwards (by the shell, the user or
+// another session) aren't silently discarded.
+func (c *Checkpoints) Undo(session string, force bool) (UndoResult, error) {
 	if c == nil {
 		return UndoResult{}, errors.New("checkpoints are disabled")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := len(c.turns) - 1; i >= 0; i-- {
+		if session != "" && c.turns[i].Session != session {
+			continue
+		}
 		if len(c.turns[i].Changes) > 0 && c.turns[i].Run == "" { // workers' have their own undo
 			t := c.turns[i]
 			res, failed, applied, err := c.restoreLocked([]*Turn{t}, force, "/undo --force")

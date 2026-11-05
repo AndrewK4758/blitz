@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/retail-cortex/blitz/pkg/secretscan"
 )
 
 // States of a workspace's sync (EN-64).
@@ -47,7 +49,23 @@ const (
 	// Refused is the service turning this person's saves down: it was
 	// reached, so it isn't Offline; Err says why, in Git's words.
 	Refused = "refused"
+	// Secrets is a save held back on this computer: what it would send
+	// holds what looks like an API key or another secret (Err names
+	// where), and nothing goes until it's taken out.
+	Secrets = "secrets"
 )
+
+// Failed is whether a sync's state means the service hasn't got this
+// computer's saves: Offline, SignedOut, Refused or Secrets. The service
+// says so with the state (GetOrgSync's failed), so the clients needn't
+// keep their own list.
+func Failed(state string) bool {
+	switch state {
+	case Offline, SignedOut, Refused, Secrets:
+		return true
+	}
+	return false
+}
 
 // refusals are what Git says when the remote was reached and turned a
 // push down (beside a push behind others', which sync takes first).
@@ -98,6 +116,7 @@ type Syncer struct {
 	remote  chan struct{}
 	asked   chan chan State // SaveNow's, answered with the state after
 	status  string          // git status as last seen
+	held    string          // git status when a save was held back for secrets
 	changed time.Time       // when it last changed
 }
 
@@ -259,7 +278,7 @@ func (s *Syncer) due() bool {
 	if st != s.status {
 		s.status, s.changed = st, s.now()
 	}
-	return st != "" && s.now().Sub(s.changed) >= or(s.Quiet, 5*time.Second)
+	return st != "" && st != s.held && s.now().Sub(s.changed) >= or(s.Quiet, 5*time.Second)
 }
 
 // failed sets the state for err: signed out, refused by the service, else
@@ -275,10 +294,26 @@ func (s *Syncer) failed(err error) {
 	s.set(State{State: st, Pairs: s.State().Pairs, Err: err.Error()})
 }
 
+// errSecrets is a save held back for the secrets in it.
+type errSecrets struct{ where string }
+
+func (e errSecrets) Error() string {
+	return "not saved: these look like secrets: " + e.where + ". Take them out (keep them in the keychain or an ignored file), or mark a false alarm with " + secretscan.AllowMarker + " on its line"
+}
+
 // save commits everything and pushes it, taking others' changes first.
 func (s *Syncer) save(ctx context.Context) {
 	s.set(State{State: Saving, Pairs: s.State().Pairs})
 	if err := s.commit(ctx); err != nil {
+		if errors.As(err, new(errSecrets)) {
+			// Not tried again until something changes.
+			out, _ := s.Git(ctx, s.Dir, "status", "--porcelain=v1", "--untracked-files=all")
+			s.mu.Lock()
+			s.held = string(out)
+			s.mu.Unlock()
+			s.set(State{State: Secrets, Pairs: s.State().Pairs, Err: err.Error()})
+			return
+		}
 		s.failed(err)
 		return
 	}
@@ -291,15 +326,42 @@ func (s *Syncer) commit(ctx context.Context) error {
 		return err
 	}
 	files, _ := s.Git(ctx, s.Dir, "diff", "--cached", "--name-only")
+	if err := s.scan(ctx); err != nil {
+		return err
+	}
 	if names := lines(files); len(names) > 0 {
 		if _, err := s.Git(ctx, s.Dir, "commit", "-q", "-m", message(s.Who, names)); err != nil {
 			return err
 		}
 	}
 	s.mu.Lock()
-	s.status = ""
+	s.status, s.held = "", ""
 	s.mu.Unlock()
 	return nil
+}
+
+// scan is errSecrets when a file about to be saved holds what looks like
+// a secret (spec_053 EN-62): what sync sends goes to every member and
+// the service's history.
+func (s *Syncer) scan(ctx context.Context) error {
+	added, _ := s.Git(ctx, s.Dir, "diff", "--cached", "--name-only", "--diff-filter=ACMR")
+	var where []string
+	for _, name := range lines(added) {
+		data, err := s.Git(ctx, s.Dir, "show", ":"+name)
+		if err != nil {
+			continue
+		}
+		for _, f := range secretscan.Scan(name, data) {
+			where = append(where, fmt.Sprintf("%s:%d (%s %s)", f.Path, f.Line, f.Kind, f.Masked))
+		}
+	}
+	if len(where) == 0 {
+		return nil
+	}
+	if len(where) > 5 {
+		where = append(where[:5], fmt.Sprintf("and %d more", len(where)-5))
+	}
+	return errSecrets{strings.Join(where, "; ")}
 }
 
 // push sends the saves, taking others' first when the push is refused, up
@@ -320,6 +382,11 @@ func (s *Syncer) push(ctx context.Context) {
 
 // ahead reports whether this computer has saves the service hasn't.
 func (s *Syncer) ahead(ctx context.Context) bool {
+	if _, err := s.Git(ctx, s.Dir, "rev-parse", "--verify", "-q", s.upstream()+"/main"); err != nil {
+		// Nothing shared yet: any commit here is ahead.
+		_, err := s.Git(ctx, s.Dir, "rev-parse", "--verify", "-q", "HEAD")
+		return err == nil
+	}
 	out, err := s.Git(ctx, s.Dir, "rev-list", "--count", s.upstream()+"/main..HEAD")
 	return err == nil && strings.TrimSpace(string(out)) != "0"
 }
@@ -352,7 +419,13 @@ func (s *Syncer) take(ctx context.Context) bool {
 	}
 	upstream := s.upstream() + "/main"
 	if _, err := s.Git(ctx, s.Dir, "rev-parse", "--verify", "-q", upstream); err != nil {
-		return true // nothing shared yet
+		// Nothing shared yet: what's here goes out (ahead says so), or
+		// there's nothing to do; either way the sync has a state, not
+		// none until the next fetch.
+		if !s.ahead(ctx) {
+			s.settle()
+		}
+		return true
 	}
 	if _, err := s.Git(ctx, s.Dir, "merge", "-q", "--no-edit", upstream); err == nil {
 		if !s.ahead(ctx) {

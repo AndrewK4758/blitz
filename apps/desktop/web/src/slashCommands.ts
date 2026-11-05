@@ -28,7 +28,8 @@ import { language, t, tn } from "./i18n";
 import { formatInterval, listLoops, parseInterval, startLoop, stopLoop } from "./loops";
 import { efforts, modeOf } from "./options";
 import { reloadSummary } from "./reload";
-import type { GetSettingsResponse } from "./gen/blitz/v1/workspace_pb";
+import type { GetSettingsResponse, SearchStatus } from "./gen/blitz/v1/workspace_pb";
+import { searchSources, type SearchSource } from "./search";
 
 /** The groups, in /help's order (titles: help.group.<id>, shared with the terminal). */
 export const commandGroups = ["session", "agents", "work", "workspace", "safety", "extensions", "settings"] as const;
@@ -73,6 +74,8 @@ export interface CommandContext {
   busy(): boolean;
   settingsChanged(): void;
   openView(v: "changes" | "workers" | "processes"): void;
+  /** Opens workspace search with query, on sources (undefined: the dialog's own). */
+  openSearch(query: string, sources?: SearchSource[]): void;
   /** Opens Settings on a section; connect, a URL or file for a new connection there (Connectors). */
   openSettings(section: string, scope?: string, connect?: string): void;
   reviewProject?: () => void;
@@ -112,6 +115,25 @@ const bullets = (title: string, lines: string[]) => `**${md(title)}**\n\n${lines
 const code = (s: string) => "`" + s.replace(/`/g, "'") + "`";
 const md = (s: string) => s.replace(/([\\*_[\]|<>])/g, "\\$1");
 
+// /search's words for what to search, as the terminal's (searchws.go).
+const searchWords = new Map<string, SearchSource[]>([...searchSources.map((s): [string, SearchSource[]] => [s, [s]]), ["all", [...searchSources]]]);
+
+/** /search status's text: the index's state, as the terminal says it. */
+export function searchStatusText(s: SearchStatus | undefined): string {
+  if (!s?.enabled) return t("search.ws_disabled");
+  const items = searchSources.map((src) => `${t(`search.ws_source.${src}`)} ${k(s.items[src] ?? 0)}`).join(", ");
+  const when = s.lastScan ? new Date(Number(s.lastScan.seconds) * 1000).toLocaleString(language()) : t("search.ws_never");
+  const lines = [t("search.ws_status", { items, when })];
+  if (s.scanning) lines.push(t("search.ws_scanning"));
+  if (s.unreadable > 0) lines.push(tn("search.ws_unreadable", s.unreadable));
+  if (s.embeddingModel) lines.push(t("search.ws_semantic", { model: s.embeddingModel, chunks: k(s.embedded) }));
+  if (s.embedError) lines.push(t("search.ws_embed_error", { error: s.embedError }));
+  if (s.enriched > 0) lines.push(tn("search.ws_enriched", s.enriched));
+  if (s.enrichError) lines.push(t("search.ws_enrich_error", { error: s.enrichError }));
+  if (s.error) lines.push(t("search.failed", { error: s.error }));
+  return lines.map(md).join("\n\n");
+}
+
 /** The file /export writes when given none, as the terminal names it. */
 export function exportName(title: string, id: string): string {
   let slug = title
@@ -140,7 +162,7 @@ async function listAgents(c: CommandContext) {
 async function usageTable(c: CommandContext, which: "cost" | "context") {
   const r = await sessions.getUsage({ workspace: c.dir });
   const u = r.usage;
-  if (!u || u.calls === 0) return c.say(t("desktop.usage.none"));
+  if (!u || u.calls === 0) return c.say(t("desktop.usage.none_conversation"));
   c.say(
     which === "cost"
       ? `| | |\n|---|---|\n| ${t("desktop.usage.calls")} | ${u.calls} |\n| ${t("desktop.usage.sent")} | ${k(u.input)} (${t("desktop.usage.cached", { count: k(u.cached) })}) |\n| ${t("desktop.usage.received")} | ${k(u.output)} |\n| ${t("desktop.usage.cost")} | ${u.priced ? "$" + u.costUsd.toFixed(4) : t("desktop.usage.unpriced")} |`
@@ -302,7 +324,7 @@ export const builtinCommands: Builtin[] = [
     args: "[--force]",
     group: "session",
     async run(c) {
-      const res = await workspaces.undo({ workspace: c.dir, force: c.args === "--force" });
+      const res = await workspaces.undo({ workspace: c.dir, sessionId: c.sessionId ?? "", force: c.args === "--force" });
       c.say(res.restored.length ? t("desktop.changes.undid", { label: res.label, files: res.restored.join(", ") }) : t("desktop.undo.nothing"));
       if (res.error) c.say(res.error.message, "error");
     },
@@ -484,13 +506,24 @@ export const builtinCommands: Builtin[] = [
   { name: "plan", args: "<goal>", group: "work", turn: true, run: (c) => (c.args ? c.run(c.args, { plan: true }) : c.usage()) },
   {
     name: "search",
-    args: "web|session <terms>",
+    args: "[files|documents|chats|notes|all] <terms> | status | reindex | web|session <terms>",
     group: "work",
     turn: true,
     async run(c) {
       const [sub, ...rest] = words(c.args);
       const terms = rest.join(" ").trim();
-      if (!terms || (sub !== "web" && sub !== "session")) return c.usage();
+      // As the terminal's (search.go): the workspace's index, or a search
+      // of it in the Search dialog; web and session lead to a turn.
+      if (!sub || (!terms && (sub === "web" || sub === "session" || searchWords.has(sub)))) return c.usage();
+      if (sub === "status" && !terms) return c.say(searchStatusText((await workspaces.getSearchStatus({ workspace: c.dir })).status), "info", true);
+      if (sub === "reindex" && !terms) {
+        await workspaces.reindex({ workspace: c.dir });
+        return c.say(t("search.ws_reindex"));
+      }
+      if (sub !== "web" && sub !== "session") {
+        const sources = searchWords.get(sub);
+        return c.openSearch(sources ? terms : c.args.trim(), sources);
+      }
       const recorded = `/search ${sub} ${terms}`;
       if (sub === "session") {
         const r = await sessions.searchSession({ workspace: c.dir, terms });
@@ -500,7 +533,7 @@ export const builtinCommands: Builtin[] = [
       }
       c.say(t("desktop.search.searching", { terms }));
       const r = await workspaces.searchWeb({ workspace: c.dir, terms });
-      if (r.links.length === 0) return c.say(t("desktop.search.none", { terms }));
+      if (r.links.length === 0) return c.say(t("desktop.search.found_none", { terms }));
       c.say(`${t("desktop.search.found", { provider: r.provider })}\n\n${r.links.map((l, i) => `${i + 1}. [${l.title.replace(/[[\]]/g, "")}](${l.url})`).join("\n")}\n\n${t("desktop.search.reading")}`, "info", true);
       c.run(recorded, { prompt: r.prompt, readOnly: "search", fetchGrants: r.links.map((l) => l.url), shown: recorded });
     },
@@ -642,7 +675,7 @@ export const builtinCommands: Builtin[] = [
   },
   {
     name: "mode",
-    args: "[default|accept-edits|plan|dont-ask|bypass]",
+    args: "[auto|default|accept-edits|plan|dont-ask|bypass]",
     group: "safety",
     async run(c) {
       if (!c.args) return c.say(t("desktop.mode.is", { mode: modeOf(c.settings?.permissionMode ?? "auto").label }), "info", true);

@@ -182,6 +182,31 @@ func decode(text string) ([]doc, error) {
 	}
 }
 
+// SourceTypes are the Toolbox source types of every source in a
+// connection file (connectors.SourceLister): an error for a file that
+// isn't YAML, a document with no kind, or a source with no type.
+func (Backend) SourceTypes(text string) ([]string, error) {
+	docs, err := decode(text)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range docs {
+		kind, _ := d["kind"].(string)
+		switch kind {
+		case "":
+			return nil, errors.New("a document with no kind")
+		case "source", "sources":
+			typ, _ := d["type"].(string)
+			if typ == "" {
+				return nil, fmt.Errorf("source %v has no type", d["name"])
+			}
+			out = append(out, typ)
+		}
+	}
+	return out, nil
+}
+
 // Check lists what Toolbox would refuse: a custom file that isn't YAML.
 func (Backend) Check(k *connectors.Kind, c connectors.Connection) []string {
 	if c.Custom {
@@ -217,8 +242,11 @@ func (Backend) Render(cat connectors.Category, kind *connectors.Kind, c connecto
 				continue
 			}
 		}
-		switch f.Type {
-		case connectors.FieldList:
+		switch {
+		case f.Secret():
+			// Quoted, so the filled value stays a string whatever it reads as.
+			src.Content = append(src.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: f.Key}, &yaml.Node{Kind: yaml.ScalarNode, Value: v, Style: yaml.DoubleQuotedStyle})
+		case f.Type == connectors.FieldList:
 			var list []string
 			for _, d := range strings.Split(v, ",") {
 				if d = strings.TrimSpace(d); d != "" {
@@ -226,7 +254,7 @@ func (Backend) Render(cat connectors.Category, kind *connectors.Kind, c connecto
 				}
 			}
 			addList(src, f.Key, list)
-		case connectors.FieldNumber:
+		case f.Type == connectors.FieldNumber:
 			src.Content = append(src.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: f.Key}, &yaml.Node{Kind: yaml.ScalarNode, Value: v, Tag: "!!int"})
 		default:
 			add(src, f.Key, v)
@@ -242,7 +270,7 @@ func (Backend) Render(cat connectors.Category, kind *connectors.Kind, c connecto
 	}
 	docs = append(docs, src)
 	for _, r := range kind.Tools {
-		if !slices.Contains(c.Tools, r.ID) {
+		if !slices.Contains(c.Tools, r.ID) || r.Writes && c.ReadOnly { // not offered read-only
 			continue
 		}
 		about := strings.ReplaceAll(r.Agent, "{connection}", label)

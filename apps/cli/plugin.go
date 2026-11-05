@@ -21,8 +21,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/retail-cortex/blitz/pkg/config"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/plugins"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -31,11 +34,19 @@ import (
 // newPluginCommand is `blitz plugin`: install, list, enable, disable,
 // remove and update plugins, add marketplaces, and import other agents'
 // plugins (spec_027_parity PAR-PLG-02..04).
-func newPluginCommand() *cobra.Command {
-	return newPluginCommandWith(plugins.Default())
+func newPluginCommand(g *globalFlags) *cobra.Command {
+	return newPluginCommandWith(g, plugins.Default())
 }
 
-func newPluginCommandWith(store *plugins.Store) *cobra.Command {
+// orgPluginsOff reports whether the organization's policy turns off the
+// person's own plugins (spec_053_enterprise EN-35): then none loads, and
+// listing or installing them says so.
+func orgPluginsOff(g *globalFlags) bool {
+	cfg, err := config.Load(g.config)
+	return err == nil && cfg.Org.PluginsOff()
+}
+
+func newPluginCommandWith(g *globalFlags, store *plugins.Store) *cobra.Command {
 	cmd := &cobra.Command{Use: "plugin", Aliases: []string{"plugins"}, Short: "Install and manage plugins: skills, commands, agents, hooks and MCP servers"}
 	var yes bool
 
@@ -49,7 +60,13 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			defer st.Discard()
-			return installStaged(cmd, store, st, yes)
+			if err := installStaged(cmd, store, st, yes); err != nil {
+				return err
+			}
+			if orgPluginsOff(g) {
+				fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin.org_off"))
+			}
+			return nil
 		},
 	}
 	install.Flags().BoolVarP(&yes, "yes", "y", false, "Install without asking")
@@ -64,7 +81,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 			}
 			var errs []error
 			for _, i := range list {
-				if len(args) > 0 && !contains(args, i.Name) {
+				if len(args) > 0 && !slices.Contains(args, i.Name) {
 					continue
 				}
 				st, err := fetchPlugin(cmd, store, i.Source)
@@ -74,7 +91,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				}
 				if st.Version == i.Version {
 					if h, _ := plugins.Hash(st.Dir); h == i.Hash {
-						fmt.Fprintf(cmd.OutOrStdout(), "%s %s is up to date.\n", i.Name, i.Version)
+						fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin.up_to_date", "name", i.Name, "version", i.Version))
 						st.Discard()
 						continue
 					}
@@ -105,17 +122,20 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
+			if orgPluginsOff(g) {
+				fmt.Fprintln(out, i18n.T("plugin.org_off"))
+			}
 			if len(all) == 0 {
-				fmt.Fprintln(out, "No plugins installed. Install one with: blitz plugin install <dir|url|git repo>")
+				fmt.Fprintln(out, i18n.T("plugin.none"))
 				return nil
 			}
 			for _, i := range all {
-				state := "enabled"
+				state := i18n.T("plugin.state_enabled")
 				if !i.Enabled {
-					state = "disabled"
+					state = i18n.T("plugin.state_disabled")
 				}
 				if h, err := plugins.Hash(store.PluginDir(i)); err != nil || h != i.Hash {
-					state += ", changed since installed: not loaded"
+					state += i18n.T("plugin.state_changed")
 				}
 				fmt.Fprintf(out, "%s\t%s\t%s\t%s\n", i.Name, i.Version, state, i.Source)
 			}
@@ -137,7 +157,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			printPlugin(cmd.OutOrStdout(), p)
-			fmt.Fprintf(cmd.OutOrStdout(), "\nfrom %s, %s\n", i.Source, i.Hash)
+			fmt.Fprintf(cmd.OutOrStdout(), "\n%s\n", i18n.T("plugin.from", "source", i.Source, "hash", i.Hash))
 			return nil
 		},
 	}
@@ -154,7 +174,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 					}
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: %sd for every workspace (a project's [plugins] enable or disable wins there).\n", args[0], use)
+				fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin."+use+"d", "name", args[0]))
 				restartHint(cmd.OutOrStdout())
 				return nil
 			},
@@ -172,7 +192,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				}
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s.\n", args[0])
+			fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin.removed", "name", args[0]))
 			restartHint(cmd.OutOrStdout())
 			return nil
 		},
@@ -189,11 +209,11 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Added the marketplace %s, with %d plugins:\n", m.Name, len(m.Plugins))
+			fmt.Fprintln(out, i18n.T("plugin.market_added", "name", m.Name, "count", len(m.Plugins)))
 			for _, e := range m.Plugins {
 				fmt.Fprintf(out, "  %s %s\t%s\n", e.Name, e.Version, e.Description)
 			}
-			fmt.Fprintf(out, "Install one with: blitz plugin install <name>@%s\n", m.Name)
+			fmt.Fprintln(out, i18n.T("plugin.market_install_hint", "name", m.Name))
 			return nil
 		},
 	}, &cobra.Command{
@@ -206,7 +226,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			if len(list) == 0 {
-				fmt.Fprintln(cmd.OutOrStdout(), "No marketplaces. Add one with: blitz plugin marketplace add <url>")
+				fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin.market_none"))
 			}
 			for _, k := range list {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s\t%s\n", k.Name, k.URL)
@@ -221,7 +241,7 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 			if err := store.RemoveMarketplace(args[0]); err != nil {
 				return withCode(exitUsage, err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Removed the marketplace %s.\n", args[0])
+			fmt.Fprintln(cmd.OutOrStdout(), i18n.T("plugin.market_removed", "name", args[0]))
 			return nil
 		},
 	})
@@ -250,17 +270,17 @@ func newPluginCommandWith(store *plugins.Store) *cobra.Command {
 				return err
 			}
 			w := cmd.OutOrStdout()
-			fmt.Fprintf(w, "Made the plugin %s %s in %s:\n", r.Plugin.Name, r.Plugin.Version, r.Out)
+			fmt.Fprintln(w, i18n.T("plugin.imported", "name", r.Plugin.Name, "version", r.Plugin.Version, "dir", r.Out))
 			for _, a := range r.Added {
 				fmt.Fprintf(w, "  + %s\n", a)
 			}
 			if len(r.Skipped) > 0 {
-				fmt.Fprintln(w, "Not converted:")
+				fmt.Fprintln(w, i18n.T("plugin.not_converted"))
 				for _, s := range r.Skipped {
 					fmt.Fprintf(w, "  - %s\n", s)
 				}
 			}
-			fmt.Fprintf(w, "Try it with --plugin-dir %s, or install it: blitz plugin install %s\n", r.Out, r.Out)
+			fmt.Fprintln(w, i18n.T("plugin.import_hint", "dir", r.Out))
 			return nil
 		},
 	}
@@ -290,7 +310,7 @@ func installStaged(cmd *cobra.Command, store *plugins.Store, st *plugins.Staged,
 			return err
 		}
 		if !ok {
-			fmt.Fprintln(out, "Not installed.")
+			fmt.Fprintln(out, i18n.T("plugin.not_installed"))
 			return nil
 		}
 	}
@@ -298,11 +318,11 @@ func installStaged(cmd *cobra.Command, store *plugins.Store, st *plugins.Staged,
 	if err != nil {
 		return err
 	}
-	state := "enabled"
+	key := "plugin.installed"
 	if !i.Enabled {
-		state = "disabled, as before"
+		key = "plugin.installed_disabled"
 	}
-	fmt.Fprintf(out, "Installed %s %s (%s).\n", i.Name, i.Version, state)
+	fmt.Fprintln(out, i18n.T(key, "name", i.Name, "version", i.Version))
 	restartHint(out)
 	return nil
 }
@@ -315,7 +335,7 @@ func printPlugin(out io.Writer, p *plugins.Plugin) {
 	fmt.Fprintln(out)
 	summary := p.Summary()
 	if len(summary) == 0 {
-		fmt.Fprintln(out, "  (it adds nothing)")
+		fmt.Fprintln(out, i18n.T("plugin.adds_nothing"))
 	}
 	for _, s := range summary {
 		fmt.Fprintf(out, "  %s\n", s)
@@ -328,9 +348,9 @@ func confirmPlugin(in io.Reader, out io.Writer, runsCode bool) (bool, error) {
 	if f, ok := in.(*os.File); ok && !term.IsTerminal(int(f.Fd())) {
 		return false, withCode(exitUsage, errors.New("not a terminal to ask in: add --yes to install"))
 	}
-	q := "Install it? [y/N] "
+	q := i18n.T("plugin.confirm")
 	if runsCode {
-		q = "It runs code on your machine (above). Install it? [y/N] "
+		q = i18n.T("plugin.confirm_code")
 	}
 	fmt.Fprint(out, q)
 	line, err := bufio.NewReader(in).ReadString('\n')
@@ -339,13 +359,4 @@ func confirmPlugin(in io.Reader, out io.Writer, runsCode bool) (bool, error) {
 	}
 	a := strings.ToLower(strings.TrimSpace(line))
 	return a == "y" || a == "yes", nil
-}
-
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }

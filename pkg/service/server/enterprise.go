@@ -15,6 +15,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -36,9 +37,14 @@ import (
 // settings, registered so the models renew through it too, and one
 // sign-in at a time.
 type enterpriseConn struct {
-	mu        sync.Mutex
-	c         *enterprise.Client
-	signingIn sync.Mutex
+	mu sync.Mutex
+	c  *enterprise.Client
+	// helperMu makes setting a clone's credential helper one step at a
+	// time (setHelper).
+	helperMu sync.Mutex
+	// signingIn holds a token while a sign-in runs (beginSignIn).
+	signingIn chan struct{}
+	slotOnce  sync.Once
 	// stop ends the catalog's loop for c; kick asks it to fetch now (a
 	// sign-in, a connection); done is closed when it has ended.
 	stop func()
@@ -199,7 +205,7 @@ func (s *Server) enterpriseState(ctx context.Context, c *enterprise.Client, chec
 		return &pb.EnterpriseState{}
 	}
 	st := c.Status()
-	out := &pb.EnterpriseState{Url: st.URL, SignedIn: st.SignedIn, TermsVersion: st.Terms, Managed: config.ManagedURL() != ""}
+	out := &pb.EnterpriseState{Url: st.URL, SignedIn: st.SignedIn, TermsVersion: st.Terms, Managed: config.Managed()}
 	info := st.Info
 	if check {
 		cctx, cancel := context.WithTimeout(ctx, discoverTimeout)
@@ -238,7 +244,7 @@ func (h configService) GetEnterprise(ctx context.Context, r req[pb.GetEnterprise
 }
 
 func (h configService) ConnectEnterprise(ctx context.Context, r req[pb.ConnectEnterpriseRequest]) (*connect.Response[pb.ConnectEnterpriseResponse], error) {
-	if config.ManagedURL() != "" {
+	if config.Managed() {
 		return nil, apiError(connect.CodeFailedPrecondition, "MANAGED", config.ErrManaged)
 	}
 	previous, _ := h.s.enterpriseClient()
@@ -256,6 +262,12 @@ func (h configService) ConnectEnterprise(ctx context.Context, r req[pb.ConnectEn
 		r.Msg.Url = u
 	}
 	if previous != nil && previous.URL() != r.Msg.Url {
+		// Its catalog's loop ends first, so nothing it fetches lands in
+		// the folder being removed; the next connection starts afresh.
+		h.s.ent.mu.Lock()
+		h.s.ent.stopCatalog()
+		h.s.ent.c = nil
+		h.s.ent.mu.Unlock()
 		// Another organization, or none: this one's session ends.
 		if err := previous.SignOut(ctx); err != nil {
 			slog.Warn("signing out of the organization's service", "error", err)
@@ -285,10 +297,12 @@ func (h configService) EnterpriseSignIn(ctx context.Context, r req[pb.Enterprise
 	if c == nil {
 		return apiError(connect.CodeFailedPrecondition, "NOT_CONNECTED", errors.New("connect to your organization's service first"))
 	}
-	if !h.s.ent.signingIn.TryLock() {
-		return apiError(connect.CodeAborted, "SIGN_IN_RUNNING", errors.New("a sign-in to your organization is already under way"))
+	end, ok := h.s.ent.beginSignIn(ctx)
+	if !ok {
+		// As a provider's sign-in already under way (signin.go).
+		return apiError(connect.CodeAlreadyExists, "SIGN_IN_RUNNING", errors.New("a sign-in to your organization is already under way"))
 	}
-	defer h.s.ent.signingIn.Unlock()
+	defer end()
 	show := func(p enterprise.Prompt) { _ = stream.Send(&pb.EnterpriseSignInResponse{Url: p.URL, Code: p.Code}) }
 	if r.Msg.Device {
 		err = c.SignInDevice(ctx, show)
@@ -304,6 +318,27 @@ func (h configService) EnterpriseSignIn(ctx context.Context, r req[pb.Enterprise
 	h.changed(ctx, "", "")
 	h.s.ent.kickCatalog() // the catalog, now there's a sign-in
 	return stream.Send(&pb.EnterpriseSignInResponse{Done: true, State: h.s.enterpriseState(ctx, c, false)})
+}
+
+// signInWait is how long a sign-in waits for one that's ending before
+// saying one is under way: a person who gave up on a sign-in and started
+// again shouldn't be told the first still runs while it winds down (tests
+// shorten it).
+var signInWait = 2 * time.Second
+
+// beginSignIn takes the one sign-in's place, waiting up to signInWait for
+// it, and returns what gives it back; false when another sign-in holds it.
+func (e *enterpriseConn) beginSignIn(ctx context.Context) (func(), bool) {
+	e.slotOnce.Do(func() { e.signingIn = make(chan struct{}, 1) })
+	t := time.NewTimer(signInWait)
+	defer t.Stop()
+	select {
+	case e.signingIn <- struct{}{}:
+		return func() { <-e.signingIn }, true
+	case <-t.C:
+	case <-ctx.Done():
+	}
+	return nil, false
 }
 
 func (h configService) EnterpriseSignOut(ctx context.Context, _ req[pb.EnterpriseSignOutRequest]) (*connect.Response[pb.EnterpriseSignOutResponse], error) {
@@ -404,7 +439,8 @@ func enterpriseError(err error) error {
 	case errors.As(err, &ref) && ref.Status == http.StatusConflict:
 		return apiError(connect.CodeAborted, "CONFLICT", err)
 	case errors.As(err, &ref) && ref.Status/100 == 4:
-		return apiError(connect.CodeFailedPrecondition, strings.ToUpper(ref.Code), err)
+		// The service's own code, upper-cased (spec_021 SVC-30a).
+		return apiError(connect.CodeFailedPrecondition, cmp.Or(strings.ToUpper(ref.Code), "REFUSED"), err)
 	default:
 		return apiError(connect.CodeUnavailable, "UNREACHABLE", err)
 	}

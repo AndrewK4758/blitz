@@ -17,6 +17,7 @@ package client
 import (
 	"context"
 	"errors"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"time"
 
 	"connectrpc.com/connect"
@@ -109,7 +110,7 @@ func (s *Settings) SignInOrganization(ctx context.Context, device bool, on func(
 	if err := stream.Err(); err != nil {
 		return Organization{}, fromAPI(err)
 	}
-	return Organization{}, errors.New("the service ended the sign-in without a result")
+	return Organization{}, errors.New(i18n.T("attached.sign_in_unfinished"))
 }
 
 // SignOutOrganization signs out of the organization's service
@@ -207,10 +208,10 @@ func (s *Settings) OpenOrgWorkspace(ctx context.Context, handle string) (dir str
 	return res.Msg.Dir, res.Msg.Cloned, nil
 }
 
-// GitCredential is Git's credential for host (ConfigService.GitCredential):
-// ok false when the service has none for it.
-func (s *Settings) GitCredential(ctx context.Context, host string) (user, password string, ok bool, err error) {
-	res, err := s.c.GitCredential(ctx, connect.NewRequest(&pb.GitCredentialRequest{Host: host}))
+// GitCredential is Git's credential for host, asked over protocol
+// (ConfigService.GitCredential): ok false when the service has none for it.
+func (s *Settings) GitCredential(ctx context.Context, protocol, host string) (user, password string, ok bool, err error) {
+	res, err := s.c.GitCredential(ctx, connect.NewRequest(&pb.GitCredentialRequest{Host: host, Protocol: protocol}))
 	if err != nil {
 		return "", "", false, fromAPI(err)
 	}

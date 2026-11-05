@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"regexp"
 	"strconv"
 	"strings"
@@ -65,6 +66,45 @@ func parsePatch(text string) ([]filePatch, error) {
 		return parseBeginPatch(text)
 	}
 	return parseUnified(text)
+}
+
+// PatchTargets returns the files a patch for apply_patch names: those it
+// writes (updated, added, or moved from or to) and those it deletes
+// (deleted, or moved from). A patch apply_patch can't parse is read line by
+// line for its file headers instead, so a hook's if or a file rule still
+// sees every file it names.
+func PatchTargets(patch string) (written, deleted []string) {
+	if patches, err := parsePatch(patch); err == nil {
+		for _, p := range patches {
+			switch {
+			case p.op == opDelete:
+				deleted = append(deleted, p.path)
+			case p.moveTo != "":
+				written = append(written, p.path, p.moveTo)
+				deleted = append(deleted, p.path)
+			default:
+				written = append(written, p.path)
+			}
+		}
+		return written, deleted
+	}
+	for line := range strings.Lines(patch) {
+		line = strings.TrimRight(line, "\r\n")
+		if p, ok := strings.CutPrefix(line, "*** Delete File: "); ok {
+			if p = strings.TrimSpace(p); p != "" {
+				deleted = append(deleted, p)
+			}
+			continue
+		}
+		for _, prefix := range []string{"+++ ", "--- ", "*** Update File: ", "*** Add File: ", "*** Move to: "} {
+			if p, ok := strings.CutPrefix(line, prefix); ok {
+				if p = diffPath(strings.TrimPrefix(diffPath(p, "a/"), "b/"), ""); p != "" && p != "/dev/null" {
+					written = append(written, p)
+				}
+			}
+		}
+	}
+	return written, deleted
 }
 
 func parseUnified(text string) ([]filePatch, error) {
@@ -275,8 +315,10 @@ func parseBeginPatch(text string) ([]filePatch, error) {
 // by the model don't make an otherwise unambiguous patch fail.
 func applyHunks(content string, hunks []patchHunk) (string, error) {
 	// Match on LF-normalised text and restore CRLF afterwards, since patch
-	// lines never carry the carriage returns.
-	crlf := strings.Contains(content, "\r\n")
+	// lines never carry the carriage returns: only when every line ends in
+	// CRLF, so a file with mixed endings keeps the lines the patch doesn't
+	// touch as they are (its lines' CRs are trailing space to the matcher).
+	crlf := strings.Contains(content, "\r\n") && strings.Count(content, "\r\n") == strings.Count(content, "\n")
 	if crlf {
 		content = strings.ReplaceAll(content, "\r\n", "\n")
 		out, err := applyHunks(content, hunks)
@@ -318,15 +360,31 @@ func applyHunks(content string, hunks []patchHunk) (string, error) {
 			}
 		}
 
+		// The hunk's leading and trailing context is kept as the file has it
+		// (its whitespace, a CR at the end of a line), not as the patch
+		// spells it: only the lines that change are replaced.
+		pre, suf := commonEnds(h.old, h.new)
 		replaced := make([]string, 0, len(lines)-len(h.old)+len(h.new))
-		replaced = append(replaced, lines[:at]...)
-		replaced = append(replaced, h.new...)
-		replaced = append(replaced, lines[at+len(h.old):]...)
+		replaced = append(replaced, lines[:at+pre]...)
+		replaced = append(replaced, h.new[pre:len(h.new)-suf]...)
+		replaced = append(replaced, lines[at+len(h.old)-suf:]...)
 		lines = replaced
 		delta += len(h.new) - len(h.old)
 		pos = at + len(h.new)
 	}
 	return joinLines(lines, hadNewline || content == ""), nil
+}
+
+// commonEnds is how many lines old and new share at the start, and then
+// at the end, without overlapping.
+func commonEnds(old, new []string) (pre, suf int) {
+	for pre < len(old) && pre < len(new) && old[pre] == new[pre] {
+		pre++
+	}
+	for suf < len(old)-pre && suf < len(new)-pre && old[len(old)-1-suf] == new[len(new)-1-suf] {
+		suf++
+	}
+	return pre, suf
 }
 
 // findBlock returns where block occurs in lines at or after from, preferring
@@ -486,8 +544,11 @@ func NewApplyPatchTool(ws *Workspace, hooks *Hooks) (tool.Tool, error) {
 			}
 
 			var diff strings.Builder
-			var names, touched []string
+			var names, touched, deleted []string
 			for _, c := range plan {
+				if c.target != c.path || c.deleteIt {
+					deleted = append(deleted, c.path) // deleted, or moved away
+				}
 				d := unifiedDiff(c.path, c.before, c.after)
 				if c.target != c.path {
 					d = fmt.Sprintf("rename %s -> %s\n", c.path, c.target) + unifiedDiff(c.target, c.before, c.after)
@@ -499,8 +560,10 @@ func NewApplyPatchTool(ws *Workspace, hooks *Hooks) (tool.Tool, error) {
 					touched = append(touched, c.target)
 				}
 			}
-			if err := hooks.Approve(ctx, writeApproval(ws, "apply_patch",
-				fmt.Sprintf("Apply patch to %d file(s): %s", len(plan), strings.Join(names, ", ")), diff.String(), touched...)); err != nil {
+			req := writeApproval(ws, "apply_patch",
+				fmt.Sprintf("Apply patch to %d file(s): %s", len(plan), strings.Join(names, ", ")), diff.String(), touched...)
+			req.Deletes = deleted
+			if err := hooks.Approve(ctx, req); err != nil {
 				return fail(err)
 			}
 			for _, c := range plan {
@@ -610,7 +673,11 @@ func executePlan(ctx context.Context, ws *Workspace, plan []plannedChange) error
 			}
 			done = append(done, undo{c.path, c.before, true})
 		case c.target != c.path:
-			if err := ws.CreateExclusive(ctx, c.target, []byte(c.after)); err != nil {
+			mode := fs.FileMode(0o644)
+			if info, err := ws.Stat(c.path); err == nil {
+				mode = info.Mode().Perm() // a moved script stays executable
+			}
+			if err := ws.createExclusive(ctx, c.target, []byte(c.after), mode); err != nil {
 				return rollback(fmt.Errorf("write %s: %w", c.target, err))
 			}
 			done = append(done, undo{c.target, "", false})

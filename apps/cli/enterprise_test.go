@@ -26,6 +26,7 @@ import (
 
 	"github.com/retail-cortex/blitz/pkg/client"
 	"github.com/retail-cortex/blitz/pkg/enterprise/enterprisetest"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,20 @@ func TestEnterpriseCommand(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "version 1.0.0; offers gateway, jobs, branding")
 	assert.Contains(t, out, "Signed in     no: blitz enterprise login")
+	out, err = runCLI(t, "enterprise", "about")
+	require.NoError(t, err)
+	assert.Contains(t, out, "hasn't published anything about itself")
+	org.Mu.Lock()
+	org.Branding = map[string]any{"name": "Acme Assist", "about": "Our assistant.", "support": "https://help.acme.com"}
+	org.Mu.Unlock()
+	out, err = runCLI(t, "enterprise", "about")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Acme Assist\n\nOur assistant.")
+	assert.Contains(t, out, "Support: https://help.acme.com")
+	org.Mu.Lock()
+	org.Branding = nil
+	org.Mu.Unlock()
+	i18n.SetAppName("") // the refresh named the program for the organization
 
 	out, err = runCLI(t, "enterprise", "login")
 	require.NoError(t, err, out)
@@ -96,7 +111,7 @@ func TestEnterpriseCommand(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "a-file")
 	require.NoError(t, os.WriteFile(file, nil, 0o600))
 	t.Setenv("BLITZ_SOCKET", filepath.Join(file, "s.sock"))
-	for _, args := range [][]string{{"status"}, {"connect", "https://b.acme.com"}, {"disconnect"}, {"login"}, {"logout"}, {"terms"}, {"workspaces"}, {"open", "x"}, {"create", "x"}, {"share", "."}} {
+	for _, args := range [][]string{{"status"}, {"about"}, {"connect", "https://b.acme.com"}, {"disconnect"}, {"login"}, {"logout"}, {"terms"}, {"workspaces"}, {"open", "x"}, {"create", "x"}, {"share", "."}} {
 		_, err := runCLI(t, append([]string{"enterprise"}, args...)...)
 		assert.ErrorContains(t, err, "starting the Blitz service", args)
 	}
@@ -120,6 +135,33 @@ func TestDescribeOrganization(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var b bytes.Buffer
 			describeOrganization(&b, c.o)
+			for _, w := range c.want {
+				assert.Contains(t, b.String(), w)
+			}
+		})
+	}
+}
+
+// What the organization says about itself, as the desktop's About shows
+// it (EN-52; N26 cli-1#8).
+func TestDescribeBranding(t *testing.T) {
+	cases := map[string]struct {
+		b    client.Branding
+		why  string
+		want []string
+	}{
+		"none":  {want: []string{"hasn't published anything about itself"}},
+		"stale": {b: client.Branding{Name: "Acme"}, why: "offline", want: []string{"Couldn't ask your organization's service (offline)", "Acme"}},
+		"all": {b: client.Branding{Name: "Acme Assist", About: "Our assistant.", Support: "https://help.acme.com", Documents: []client.OrgDocument{
+			{Document: "terms", Version: "v1", Text: "Be kind."}, {Document: "privacy", Version: "p2", Text: "We keep little."}}},
+			want: []string{"Acme Assist\n\nOur assistant.", "Support: https://help.acme.com", "Terms of service (version v1): blitz enterprise terms", "Privacy notice (version p2):\nWe keep little."}},
+		"links": {b: client.Branding{Documents: []client.OrgDocument{{Document: "privacy", Version: "p1", URL: "https://acme.com/privacy"}, {Document: "terms", Version: "v2", URL: "https://acme.com/terms"}}},
+			want: []string{"Privacy notice (version p1): https://acme.com/privacy", "Terms of service (version v2): https://acme.com/terms"}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			var b bytes.Buffer
+			describeBranding(&b, c.b, c.why)
 			for _, w := range c.want {
 				assert.Contains(t, b.String(), w)
 			}
@@ -172,6 +214,40 @@ func TestEnterpriseTerms(t *testing.T) {
 	require.NoError(t, err)
 	_, err = runCLI(t, "enterprise", "terms")
 	assert.Error(t, err, "signed out")
+}
+
+// A scripted login (stdin not a terminal) asks nothing and stays signed
+// in with the terms waiting, saying how to accept them; blitz enterprise
+// terms in a terminal accepts them afterwards (EN-53a, N26 cli-behaviour).
+func TestEnterpriseTermsWithoutATerminal(t *testing.T) {
+	t.Cleanup(http.DefaultClient.CloseIdleConnections)
+	isolate(t)
+	secrets.SetDefault(&secrets.Memory{})
+	idp := enterprisetest.NewProvider(t)
+	org := enterprisetest.NewService(t, idp.URL)
+	org.Version = "v3"
+	_, err := runCLI(t, "enterprise", "connect", org.URL)
+	require.NoError(t, err)
+
+	for _, args := range [][]string{{"enterprise", "login"}, {"enterprise", "terms"}} {
+		t.Run(args[1], func(t *testing.T) {
+			out, err := runCLIWithFile(t, args...)
+			require.NoError(t, err, out)
+			assert.NotContains(t, out, "Accept them? [y/N]", "nothing asked")
+			assert.NotContains(t, out, "signed out")
+			assert.Contains(t, out, "Acme Assist's terms (version v3) wait to be accepted")
+			assert.Contains(t, out, "blitz enterprise terms")
+			stopPrivate()
+
+			out, err = runCLI(t, "enterprise", "status")
+			require.NoError(t, err, out)
+			assert.Contains(t, out, "ana@acme.com", "still signed in")
+			assert.Contains(t, out, "version v3 to accept")
+		})
+	}
+	out, err := runCLIWith(t, "y\n", "enterprise", "terms")
+	require.NoError(t, err, out)
+	assert.Contains(t, out, "✓ Accepted Acme Assist's terms (version v3).")
 }
 
 // blitz enterprise workspaces and create, and blitz git-credential
@@ -430,6 +506,7 @@ func TestEnterpriseJobsCommand(t *testing.T) {
 		"limits": []any{
 			map[string]any{"scope_kind": "person", "period": "day", "unit": "usd", "amount_usd": 5.0, "used": map[string]any{"cost_usd": 0.25}, "resets": "2026-11-03T00:00:00Z"},
 			map[string]any{"scope_kind": "group", "period": "month", "unit": "tokens", "model": "claude", "tokens": 1000000, "used": map[string]any{"input_tokens": 1200, "output_tokens": 300}},
+			map[string]any{"scope_kind": "person", "period": "month", "unit": "tokens", "input_tokens": 1000, "output_tokens": 800, "used": map[string]any{"input_tokens": 600, "output_tokens": 600}},
 		},
 		"rate_limits": []any{map[string]any{"model": "claude", "person_rpm": 10, "tpm": 50000}},
 		"prompt_logs": true,
@@ -438,7 +515,8 @@ func TestEnterpriseJobsCommand(t *testing.T) {
 	out, err = runCLI(t, "enterprise", "usage")
 	require.NoError(t, err)
 	for _, want := range []string{"claude", "3 requests", "$0.0500", "person day budget on every model: $0.25 of $5.00 used ($4.75 left)",
-		"group month quota on claude: 1500 of 1000000 tokens used", "10 requests a minute for you, 50000 tokens a minute for everyone",
+		"group month quota on claude: 1500 of 1000000 tokens used (998500 left)",
+		"person month quota on every model: 600 of 1000 input tokens used (400 left)", "person month quota on every model: 600 of 800 output tokens used (200 left)", "10 requests a minute for you, 50000 tokens a minute for everyone",
 		"Your organization keeps what's sent to its models"} {
 		assert.Contains(t, out, want)
 	}
@@ -555,7 +633,7 @@ func TestEnterpriseCatalogCommand(t *testing.T) {
 
 // Why the service hasn't got a job, and what to do, as Studio says it
 // (spec_053 EN-42).
-func TestMissingText(t *testing.T) {
+func TestMissingErr(t *testing.T) {
 	for name, c := range map[string]struct {
 		m    client.ServiceJobMissing
 		want string
@@ -572,7 +650,7 @@ func TestMissingText(t *testing.T) {
 		"unreadable":  {client.ServiceJobMissing{Reason: "not_read", Detail: "the service is down"}, "yet: the service is down"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			assert.Contains(t, missingText("d", &c.m), c.want)
+			assert.ErrorContains(t, missingErr("d", &c.m), c.want)
 		})
 	}
 }
@@ -580,23 +658,22 @@ func TestMissingText(t *testing.T) {
 // How a sync stands, in words: never Git's alone.
 func TestPrintOrgSync(t *testing.T) {
 	for _, tt := range []struct {
-		st     client.OrgSync
-		want   string
-		failed bool
+		st   client.OrgSync
+		want string
 	}{
-		{client.OrgSync{State: "saved"}, "✓ Saved: the service has everything\n", false},
-		{client.OrgSync{State: "saving"}, "Saving…\n", false},
-		{client.OrgSync{State: "offline", Error: "could not resolve host"}, "Not saved: the service can't be reached, so the changes wait on this computer\n  could not resolve host\n", true},
-		{client.OrgSync{State: "signed_out"}, "Not saved: signed out (blitz enterprise login)\n", true},
-		{client.OrgSync{State: "refused", Error: "remote unpack failed"}, "Not saved: the service refused it\n  remote unpack failed\n", true},
-		{client.OrgSync{State: "conflicts", Pairs: [][2]string{{"plan.md", "plan (conflict, Ana).md"}}}, "Saved, with both versions of these files kept:\n  plan.md (yours: plan (conflict, Ana).md)\n", false},
-		{client.OrgSync{State: "later"}, "later\n", false},
+		{client.OrgSync{State: "saved"}, "✓ Saved: the service has everything\n"},
+		{client.OrgSync{State: "saving"}, "Saving…\n"},
+		{client.OrgSync{State: "offline", Error: "could not resolve host"}, "Not saved: the service can't be reached, so the changes wait on this computer\n  could not resolve host\n"},
+		{client.OrgSync{State: "signed_out"}, "Not saved: signed out (blitz enterprise login)\n"},
+		{client.OrgSync{State: "refused", Error: "remote unpack failed"}, "Not saved: the service refused it\n  remote unpack failed\n"},
+		{client.OrgSync{State: "secrets", Error: ".env:1 (AWS access key AKIA••••)"}, "Not saved: it holds what looks like a secret, so the changes wait on this computer\n  .env:1 (AWS access key AKIA••••)\n"},
+		{client.OrgSync{State: "conflicts", Pairs: [][2]string{{"plan.md", "plan (conflict, Ana).md"}}}, "Saved, with both versions of these files kept:\n  plan.md (yours: plan (conflict, Ana).md)\n"},
+		{client.OrgSync{State: "later"}, "later\n"},
 	} {
 		t.Run(tt.st.State, func(t *testing.T) {
 			var b strings.Builder
 			printOrgSync(&b, tt.st)
 			assert.Equal(t, tt.want, b.String())
-			assert.Equal(t, tt.failed, failedSync(tt.st.State))
 		})
 	}
 }

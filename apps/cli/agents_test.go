@@ -80,10 +80,60 @@ func TestBackgroundNeedsItsArguments(t *testing.T) {
 			assert.Equal(t, exitUsage, exitCodeFor(err), "%v: %v", args, err)
 		})
 	}
-	for _, args := range [][]string{{"--bg", "hello"}, {"agents"}, {"logs", "bg-1"}, {"stop", "bg-1"}, {"attach", "bg-1"}} {
-		t.Run(args[0]+" without the service", func(t *testing.T) {
+	// Run flags a background run can't carry are refused, not dropped
+	// (N26 cli-2#1).
+	for name, args := range map[string][]string{
+		"deny":            {"--bg", "--deny", "shell(git push *)", "hello"},
+		"allow":           {"--bg", "--allow", "shell(go test *)", "hello"},
+		"permission-mode": {"--bg", "--permission-mode", "plan", "hello"},
+		"model":           {"--bg", "--model", "m", "hello"},
+		"agent":           {"--bg", "-a", "qa", "hello"},
+		"effort":          {"--bg", "--effort", "high", "hello"},
+		"name":            {"--bg", "--name", "n", "hello"},
+		"add-dir":         {"--bg", "--add-dir", "/tmp", "hello"},
+		"exec":            {"exec", "--bg", "--deny", "shell(rm *)", "hello"},
+	} {
+		t.Run("refuses "+name, func(t *testing.T) {
 			_, err := runCLI(t, args...)
-			assert.ErrorIs(t, err, errNeedsService)
+			assert.Equal(t, exitUsage, exitCodeFor(err), "%v: %v", args, err)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--bg can't carry")
+		})
+	}
+}
+
+// --bg, agents, logs, stop and attach start the service when it isn't
+// running, as every other command that needs it does (N26 cli-behaviour).
+func TestBackgroundCommandsStartTheService(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    string
+		unknown bool
+	}{
+		{"bg", []string{"--bg", "hello"}, "Started bg-1", false},
+		{"agents", []string{"agents"}, "No background runs are going", false},
+		{"logs", []string{"logs", "bg-9"}, "", true},
+		{"stop", []string{"stop", "bg-9"}, "", true},
+		{"attach", []string{"attach", "bg-9"}, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeModel(t, isolate(t))
+			started := 0
+			inner := startShared
+			startShared = func(ctx context.Context, s string) error { started++; return inner(ctx, s) }
+			t.Cleanup(func() { startShared = inner })
+			require.False(t, socket.Running(socket.DefaultSocket()))
+			args := append([]string{"-d", t.TempDir()}, tt.args...)
+			out, err := runCLI(t, args...)
+			assert.Equal(t, 1, started, "the service started")
+			if tt.unknown {
+				assert.ErrorIs(t, err, api.ErrUnknownRun, "it asked the service")
+				return
+			}
+			require.NoError(t, err, out)
+			assert.Contains(t, out, tt.want)
 		})
 	}
 }

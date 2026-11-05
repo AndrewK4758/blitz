@@ -143,7 +143,7 @@ func TestWorkspaceCheckpointsSymlinkAndLargeFiles(t *testing.T) {
 	ws, err := NewWorkspace(dir, 4)
 	require.NoError(t, err)
 	defer ws.Close()
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "target"), []byte("ab"), 0o600))
 	require.NoError(t, os.Symlink("target", filepath.Join(dir, "link")))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "short"), []byte("0123456789"), 0o644))
@@ -159,9 +159,9 @@ func TestWorkspaceCheckpointsSymlinkAndLargeFiles(t *testing.T) {
 	require.Len(t, l, 1)
 	assert.Len(t, l[0].Files, 3)
 
-	_, err = cp.Undo(false)
+	_, err = cp.Undo("", false)
 	assert.ErrorContains(t, err, "larger than the snapshot limit")
-	res, err := cp.Undo(true)
+	res, err := cp.Undo("", true)
 	require.NoError(t, err)
 	b, err := os.ReadFile(filepath.Join(dir, "target"))
 	require.NoError(t, err)
@@ -176,7 +176,7 @@ func TestWorkspaceFailedChangeIsNotCheckpointed(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	sub := filepath.Join(dir, "sub")
 	require.NoError(t, os.Mkdir(sub, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(sub, "f"), []byte("x"), 0o644))
@@ -199,12 +199,12 @@ func TestWorkspaceCheckpointsUnreadableFile(t *testing.T) {
 		t.Skip("root reads any file")
 	}
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	p := filepath.Join(dir, "f")
 	require.NoError(t, os.WriteFile(p, []byte("secret"), 0o000))
 	cp.Begin("t")
 	require.NoError(t, ws.WriteFileAtomic(context.Background(), "f", []byte("new")))
-	_, err := cp.Undo(false)
+	_, err := cp.Undo("", false)
 	assert.ErrorContains(t, err, "larger than the snapshot limit", "its snapshot has no content")
 }
 
@@ -265,7 +265,7 @@ func TestResolveExistingPrefix(t *testing.T) {
 // /undo can put the target back.
 func TestWorkspaceInPlaceWriteFailureKeepsSnapshot(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	target := filepath.Join(dir, "target")
 	writeFile(t, target, "original")
 	require.NoError(t, os.Symlink("target", filepath.Join(dir, "link")))
@@ -281,7 +281,7 @@ func TestWorkspaceInPlaceWriteFailureKeepsSnapshot(t *testing.T) {
 	require.ErrorIs(t, err, errPartialWrite)
 	inPlaceWrite = orig
 	assert.Equal(t, "n", readString(t, target), "the target was cut short")
-	res, err := cp.Undo(false)
+	res, err := cp.Undo("", false)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"link"}, res.Restored)
 	assert.Equal(t, "original", readString(t, target))

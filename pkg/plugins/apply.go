@@ -15,6 +15,7 @@
 package plugins
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -35,7 +36,9 @@ type Loaded struct {
 // the store's enabled plugins (and those [plugins] enable names, from the
 // user or a trusted project), less those [plugins] disable names, then
 // cfg.Plugins.Dirs (--plugin-dir). A plugin whose files changed since it
-// was installed isn't loaded. Problems are returned, not fatal.
+// was installed isn't loaded. Problems are returned, not fatal. When the
+// organization's policy turns off the person's own plugins, none loads,
+// and that's said once if any would have (spec_053_enterprise EN-35).
 func Apply(cfg *config.Config, store *Store) ([]Loaded, []string) {
 	var loaded []Loaded
 	var problems []string
@@ -43,13 +46,21 @@ func Apply(cfg *config.Config, store *Store) ([]Loaded, []string) {
 	if err != nil {
 		problems = append(problems, err.Error())
 	}
+	if cfg.Org.PluginsOff() {
+		if len(cfg.Plugins.Dirs) > 0 || slices.ContainsFunc(list, func(i Installed) bool {
+			return (i.Enabled || slices.Contains(cfg.Plugins.Enable, i.Name)) && !slices.Contains(cfg.Plugins.Disable, i.Name)
+		}) {
+			problems = append(problems, config.ErrOrgPlugins.Error()+": their skills, agents, commands, hooks and MCP servers aren't loaded")
+		}
+		return nil, problems
+	}
 	for _, i := range list {
 		on := (i.Enabled || slices.Contains(cfg.Plugins.Enable, i.Name)) && !slices.Contains(cfg.Plugins.Disable, i.Name)
 		if !on {
 			continue
 		}
 		dir := store.PluginDir(i)
-		if h, err := Hash(dir); err != nil || h != i.Hash {
+		if h, err := Hash(dir); err != nil || h != i.Hash || hasLink(dir) {
 			problems = append(problems, fmt.Sprintf("plugin %s: its files changed since it was installed (reinstall it: blitz plugin update %s)", i.Name, i.Name))
 			continue
 		}
@@ -95,11 +106,12 @@ func add(cfg *config.Config, p *Plugin) []string {
 	cfg.Hooks = config.AppendHooks(cfg.Hooks, config.WithSource(rooted(p.Hooks, p.Dir), source))
 	for _, s := range p.MCP {
 		s = rootedServer(s, p.Dir)
-		if slices.ContainsFunc(cfg.MCP.Servers, func(u config.MCPServerConfig) bool { return u.Name == s.Name }) {
+		switch err := cfg.AddMCPServer(s); {
+		case errors.Is(err, config.ErrOrgMCP):
+			problems = append(problems, fmt.Sprintf("plugin %s: MCP server %s isn't used: %v", p.Name, s.Name, err))
+		case err != nil:
 			problems = append(problems, fmt.Sprintf("plugin %s: an MCP server named %s exists already; the plugin's isn't used", p.Name, s.Name))
-			continue
 		}
-		cfg.MCP.Servers = append(cfg.MCP.Servers, s)
 	}
 	return problems
 }
@@ -109,20 +121,14 @@ const RootVar = "${BLITZ_PLUGIN_ROOT}"
 
 // rooted puts the plugin's directory in its hooks' commands.
 func rooted(h config.HooksConfig, dir string) config.HooksConfig {
-	fix := func(list []config.HookConfig) []config.HookConfig {
+	return h.Map(func(list []config.HookConfig) []config.HookConfig {
 		out := slices.Clone(list)
 		for i := range out {
 			out[i].Command = strings.ReplaceAll(out[i].Command, RootVar, dir)
 			out[i].Args = replaceAll(out[i].Args, dir)
 		}
 		return out
-	}
-	h.PreTool, h.PostTool, h.PromptSubmit = fix(h.PreTool), fix(h.PostTool), fix(h.PromptSubmit)
-	h.SessionStart, h.SessionEnd, h.Stop = fix(h.SessionStart), fix(h.SessionEnd), fix(h.Stop)
-	h.PostToolFailure, h.SubagentStart, h.SubagentStop = fix(h.PostToolFailure), fix(h.SubagentStart), fix(h.SubagentStop)
-	h.PreCompact, h.PostCompact = fix(h.PreCompact), fix(h.PostCompact)
-	h.Notification, h.PermissionRequest = fix(h.Notification), fix(h.PermissionRequest)
-	return h
+	})
 }
 
 func rootedServer(s config.MCPServerConfig, dir string) config.MCPServerConfig {
@@ -147,6 +153,21 @@ func replaceAll(list []string, dir string) []string {
 		out[i] = strings.ReplaceAll(v, RootVar, dir)
 	}
 	return out
+}
+
+// hasLink reports whether dir holds a symbolic link. Installing copies
+// only regular files, and Hash skips links, so one added later would
+// change what loads while the hash still matched.
+func hasLink(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && d.Type()&os.ModeSymlink != 0 {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 func isDir(p string) bool {

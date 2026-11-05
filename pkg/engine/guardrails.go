@@ -15,21 +15,26 @@
 package engine
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/retail-cortex/blitz/pkg/api"
 	"github.com/retail-cortex/blitz/pkg/config"
 	"github.com/retail-cortex/blitz/pkg/engine/audit"
 	"github.com/retail-cortex/blitz/pkg/engine/gates"
 	"github.com/retail-cortex/blitz/pkg/engine/runtime"
+	"github.com/retail-cortex/blitz/pkg/engine/workers"
 	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/redact"
 	"github.com/retail-cortex/blitz/pkg/textutil"
@@ -40,11 +45,16 @@ import (
 // turn starts. Unlike rules, a guardrail that can't be checked refuses
 // (block) rather than lets things through.
 
-// guardSubjectLimit bounds what a custom guardrail's judge is shown, and
-// how much of a tool's result the injection patterns read.
+// guardSubjectLimit bounds what a custom guardrail's judge is shown at
+// once: longer content is judged in parts of it (overlapping by
+// guardPartOverlap, so a sentence cut between two is whole in one), up to
+// guardMaxParts; content longer than that can't be judged (a guardrail
+// that blocks refuses it). The injection patterns read all of a tool's
+// result.
 const (
 	guardSubjectLimit = 12 << 10
-	guardScanLimit    = 256 << 10
+	guardPartOverlap  = 1 << 10
+	guardMaxParts     = 8
 )
 
 // writeTools change files: the limits guardrail counts them.
@@ -57,10 +67,17 @@ func (w *Workspace) ProjectGuardrailsDir() string {
 }
 
 // guardrailDirs are the folders guardrails are read from: the
-// workspace's, then the user's (~/.blitz/guardrails); a name in the
-// workspace's wins.
-func (w *Workspace) guardrailDirs() []string {
-	return []string{w.ProjectGuardrailsDir(), filepath.Join(config.ConfigDir(""), "guardrails")}
+// organization's locked ones, the workspace's, the user's
+// (~/.blitz/guardrails), then the organization's defaults; a name in an
+// earlier folder wins, so a locked guardrail can't be replaced or switched
+// off by a file of its name (spec_053_enterprise EN-31).
+func (w *Workspace) guardrailDirs() []string { return GuardrailDirs(w.cfg, w.Dir()) }
+
+// GuardrailDirs are the folders a workspace at dir reads its guardrails
+// from, with cfg's organization (Workspace.Guardrails; blitz doctor checks
+// the same files).
+func GuardrailDirs(cfg *config.Config, dir string) []string {
+	return cfg.Org.LockedFirst([]string{filepath.Join(dir, ".agents", "guardrails"), filepath.Join(config.ConfigDir(""), "guardrails")}, "guardrails")
 }
 
 // Guardrails are the workspace's guardrails, read afresh: the built-in
@@ -69,7 +86,7 @@ func (w *Workspace) guardrailDirs() []string {
 func (w *Workspace) Guardrails() []gates.Guardrail {
 	all := gates.LoadGuardrails(w.guardrailDirs()...)
 	if off := w.cfg.Org.Policy.Builtins.Off; len(off) > 0 {
-		all = slices.DeleteFunc(all, func(g gates.Guardrail) bool { return g.Builtin != "" && slices.Contains(off, g.Builtin) })
+		all = slices.DeleteFunc(all, func(g gates.Guardrail) bool { return g.For() != "" && slices.Contains(off, g.For()) })
 	}
 	return all
 }
@@ -79,28 +96,173 @@ func (w *Workspace) Guardrails() []gates.Guardrail {
 type guardState struct {
 	all  []gates.Guardrail
 	said sync.Map
+	// turns is how many turns in the session hold it (a workflow's
+	// parallel steps share one); guarding.mu guards it.
+	turns int
 }
 
 // guarding holds the current turns' guardrails, by session.
 type guarding struct {
+	mu    sync.Mutex
 	turns sync.Map // session ID → *guardState
 }
 
+// begin is the guardrails of a turn starting in the session: those of a
+// turn already running there (a workflow's parallel steps: one set, its
+// notices once), else read reads them.
+func (g *guarding) begin(sessionID string, read func() []gates.Guardrail) *guardState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if v, ok := g.turns.Load(sessionID); ok {
+		st := v.(*guardState)
+		st.turns++
+		return st
+	}
+	st := &guardState{all: read(), turns: 1}
+	g.turns.Store(sessionID, st)
+	return st
+}
+
+// end lets go of the session's guardrails once its last turn ends.
+func (g *guarding) end(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if v, ok := g.turns.Load(sessionID); ok {
+		if st := v.(*guardState); st.turns > 1 {
+			st.turns--
+			return
+		}
+		g.turns.Delete(sessionID)
+	}
+}
+
+// turnLimits are the limits guardrails that set a turn's model-call and
+// cost limits (nil: the turn's own limit, or none), and the limits file
+// with a problem whose defaults run in its place (nil: none).
+type turnLimits struct{ turns, cost, broken *gates.Guardrail }
+
 // startGuardrails reads the guardrails for a turn in the session, and
-// applies the limits guardrail's turn and cost limits to t.
-func (w *Workspace) startGuardrails(sessionID string, t *api.Turn) {
-	st := &guardState{all: w.Guardrails()}
-	w.guards.turns.Store(sessionID, st)
-	for _, g := range gates.Active(st.all, gates.StageAction, w.engine.ActiveAgent()) {
+// applies the limits guardrail's turn and cost limits to t, as they
+// apply to agent, the turn's ("": the active agent).
+func (w *Workspace) startGuardrails(sessionID string, t *api.Turn, agent string) turnLimits {
+	st := w.guards.begin(sessionID, w.Guardrails)
+	var lim turnLimits
+	for _, g := range st.all {
+		if g.Problem != "" && g.For() == gates.BuiltinLimits {
+			lim.broken = &g
+			break
+		}
+	}
+	for _, g := range gates.Active(st.all, gates.StageAction, cmp.Or(agent, w.engine.ActiveAgent())) {
 		if g.Builtin != gates.BuiltinLimits {
 			continue
 		}
 		if l := g.Limits.MaxTurns; l > 0 && (t.MaxTurns == 0 || l < t.MaxTurns) {
-			t.MaxTurns = l
+			t.MaxTurns, lim.turns = l, &g
 		}
 		if l := g.Limits.MaxCostUSD; l > 0 && (t.MaxCostUSD == 0 || l < t.MaxCostUSD) {
-			t.MaxCostUSD = l
+			t.MaxCostUSD, lim.cost = l, &g
 		}
+	}
+	return lim
+}
+
+// limitHints say what set a turn's own limits when no guardrail did (a
+// job's file, the jobs' defaults or cap, an eval's fixed limit, [harness]
+// max_cost_usd), and how to change them; "" says nothing.
+type limitHints struct{ turns, cost string }
+
+// limitSource adds to a turn stopped at a limit what set it and how to
+// change it: the guardrail that set it (or that its file has a problem,
+// so its defaults run), else the turn's own hint; and, where someone can
+// answer (not a job's run, an eval, a skill's scenario or the
+// reflection), that "continue" carries on: a long coding turn reaches 200
+// model calls easily, and "maximum turns reached" alone sends people
+// looking for a setting.
+func (w *Workspace) limitSource(err error, lim turnLimits, attended bool, own limitHints) error {
+	var g *gates.Guardrail
+	var key, hint string
+	switch {
+	case errors.Is(err, api.ErrMaxTurns):
+		g, key, hint = lim.turns, "max_turns", own.turns
+	case errors.Is(err, api.ErrCostLimit):
+		g, key, hint = lim.cost, "max_cost_usd", own.cost
+	default:
+		return err
+	}
+	rel := w.workspaceRel
+	switch {
+	case g == nil:
+	case g.Path == "" && lim.broken != nil:
+		hint = i18n.T("guardrail.limit_broken", "name", g.Name, "key", key, "path", rel(lim.broken.Path),
+			"problem", strings.Join(strings.Fields(lim.broken.Problem), " "))
+	case g.Path == "":
+		hint = i18n.T("guardrail.limit_default", "name", g.Name, "key", key,
+			"path", filepath.Join(".agents", "guardrails", gates.BuiltinLimits+".md"))
+	default:
+		hint = i18n.T("guardrail.limit_file", "name", g.Name, "key", key, "path", rel(g.Path))
+	}
+	if hint == "" {
+		return err
+	}
+	if attended {
+		hint += " " + i18n.T("guardrail.limit_continue")
+	}
+	return fmt.Errorf("%w: %s", err, hint)
+}
+
+// guardrailProblems are the notices for the session's turn's custom
+// guardrails whose files have a problem: they check nothing, so the turn
+// says so rather than run as if they did (a built-in's runs with its
+// defaults).
+func (w *Workspace) guardrailProblems(sessionID string) []api.Notice {
+	var out []api.Notice
+	for _, g := range w.guardsFor(sessionID).all {
+		if g.Problem != "" && g.For() == "" {
+			out = append(out, api.Notice{Error: true, Text: i18n.T("guardrail.not_running", "name", g.Name, "path", w.workspaceRel(g.Path),
+				"problem", strings.Join(strings.Fields(g.Problem), " "))})
+		}
+	}
+	return out
+}
+
+// workspaceRel is path relative to the workspace when it's in it.
+func (w *Workspace) workspaceRel(path string) string {
+	if r, err := filepath.Rel(w.Dir(), path); err == nil && !strings.HasPrefix(r, "..") {
+		return r
+	}
+	return path
+}
+
+// limitSetting says which setting of the limits guardrail gr refused a
+// call, and where it's set (or would be, for its defaults).
+func (w *Workspace) limitSetting(gr gates.Guardrail, key string) string {
+	if gr.Path == "" {
+		return i18n.T("guardrail.limit_setting_default", "key", key, "path", filepath.Join(".agents", "guardrails", gates.BuiltinLimits+".md"))
+	}
+	return i18n.T("guardrail.limit_setting", "key", key, "path", w.workspaceRel(gr.Path))
+}
+
+// jobLimitHints say where a job's run's limits came from: the job's
+// WORKER.md, the jobs' defaults or their cap (Settings › Library › Jobs).
+func (w *Workspace) jobLimitHints(wk *workers.Worker, p config.WorkerPolicy) limitHints {
+	path := w.workspaceRel(wk.Path)
+	hint := func(key string, own, def, cap float64) string {
+		set := own
+		if set == 0 {
+			set = def
+		}
+		switch {
+		case cap > 0 && set > cap:
+			return i18n.T("guardrail.limit_job_cap", "key", key)
+		case own == 0:
+			return i18n.T("guardrail.limit_job_default", "key", key, "path", path)
+		}
+		return i18n.T("guardrail.limit_job", "key", key, "path", path)
+	}
+	return limitHints{
+		turns: hint("max_turns", float64(wk.Limits.MaxTurns), float64(p.DefaultMaxTurns), float64(p.MaxTurns)),
+		cost:  hint("max_cost_usd", wk.Limits.MaxCostUSD, p.DefaultMaxCostUSD, p.MaxCostUSD),
 	}
 }
 
@@ -136,9 +298,43 @@ func (w *Workspace) auditGuardrail(ctx context.Context, g gates.Guardrail, decis
 }
 
 // judgeGuardrail judges subject against a custom guardrail, secrets
-// redacted first.
+// redacted first: all of it, in parts when it's long (the first part that
+// fails is the verdict). Past guardMaxParts it can't be judged: an error,
+// which a guardrail that blocks treats as a refusal.
 func (w *Workspace) judgeGuardrail(ctx context.Context, g gates.Guardrail, subject string) (gates.Verdict, error) {
-	return gates.JudgeGuardrail(ctx, w.ruleAsker(), g, w.secretRedactor().String(textutil.Ellipsize(subject, guardSubjectLimit)))
+	parts := guardParts(w.secretRedactor().String(subject))
+	if len(parts) > guardMaxParts {
+		return gates.Verdict{}, fmt.Errorf("%d KiB is too long to judge (the most is about %d KiB)", len(subject)>>10, guardMaxParts*(guardSubjectLimit-guardPartOverlap)>>10)
+	}
+	var v gates.Verdict
+	for i, part := range parts {
+		if len(parts) > 1 {
+			part = fmt.Sprintf("(part %d of %d)\n%s", i+1, len(parts), part)
+		}
+		var err error
+		if v, err = gates.JudgeGuardrail(ctx, w.ruleAsker(), g, part); err != nil || !v.Pass {
+			return v, err
+		}
+	}
+	return v, nil
+}
+
+// guardParts splits s into parts of at most guardSubjectLimit bytes (on
+// rune boundaries), each starting guardPartOverlap before the last ended.
+func guardParts(s string) []string {
+	var parts []string
+	for {
+		part := textutil.TruncateUTF8(s, guardSubjectLimit)
+		parts = append(parts, part)
+		if len(part) == len(s) {
+			return parts
+		}
+		next := len(part) - guardPartOverlap
+		for next > 0 && !utf8.RuneStart(s[next]) {
+			next--
+		}
+		s = s[max(next, 1):]
+	}
 }
 
 // TryGuardrail judges a sample against a guardrail as written (Studio's
@@ -176,9 +372,9 @@ func (w *Workspace) maskOutput(g gates.Guardrail, text string) (string, bool) {
 type guard struct{ w *Workspace }
 
 // external reports whether a tool brings in outside content: the web,
-// the browser, an MCP server.
+// the browser, an MCP server, a workflow's call step.
 func (g guard) external(tool string) bool {
-	if slices.Contains([]string{"web_fetch", "web_search", "browser"}, tool) {
+	if slices.Contains([]string{"web_fetch", "web_search", "browser", "mcp_call", "read_mcp_resource", "api_call", "a2a_call"}, tool) {
 		return true
 	}
 	_, _, ok := g.w.tools.MCP().Lookup(tool)
@@ -236,13 +432,16 @@ func (g guard) overLimits(gr gates.Guardrail, c runtime.GuardCall) string {
 	l := gr.Limits
 	str := func(k string) string { s, _ := c.Args[k].(string); return s }
 	switch {
+	case c.Tool == "browser" && str("action") == "script" && len(l.AllowedDomains) > 0:
+		// A script can send the page, or a request, anywhere.
+		return i18n.T("guardrail.domain_script", "domains", strings.Join(l.AllowedDomains, ", ")) + " " + g.w.limitSetting(gr, "allowed_domains")
 	case c.Tool == "web_fetch" || (c.Tool == "browser" && str("action") == "navigate"):
 		if u := str("url"); !gates.DomainAllowed(u, l.AllowedDomains) {
-			return i18n.T("guardrail.domain", "url", u, "domains", strings.Join(l.AllowedDomains, ", "))
+			return i18n.T("guardrail.domain", "url", u, "domains", strings.Join(l.AllowedDomains, ", ")) + " " + g.w.limitSetting(gr, "allowed_domains")
 		}
 	case c.Tool == "run_shell_command":
 		if glob := gates.CommandDenied(str("command"), gates.ExpandCommands(l.Commands)); glob != "" {
-			return i18n.T("guardrail.command", "glob", glob)
+			return i18n.T("guardrail.command", "glob", glob) + " " + g.w.limitSetting(gr, "commands")
 		}
 	case slices.Contains(writeTools, c.Tool) && l.MaxFilesChanged > 0:
 		changed := g.w.tools.Checkpoints().LatestTurnFiles(c.Session)
@@ -251,7 +450,7 @@ func (g guard) overLimits(gr gates.Guardrail, c runtime.GuardCall) string {
 			target = filepath.Join(g.w.Dir(), target)
 		}
 		if len(changed) >= l.MaxFilesChanged && !slices.Contains(changed, target) {
-			return i18n.T("guardrail.files", "n", l.MaxFilesChanged)
+			return i18n.T("guardrail.files", "n", l.MaxFilesChanged) + " " + g.w.limitSetting(gr, "max_files_changed")
 		}
 	}
 	return ""
@@ -263,12 +462,23 @@ func (g guard) overLimits(gr gates.Guardrail, c runtime.GuardCall) string {
 func (g guard) ToolResult(ctx context.Context, c runtime.GuardCall, result map[string]any) runtime.GuardVerdict {
 	st := g.w.guardsFor(c.Session)
 	var v runtime.GuardVerdict
+	// A click, a form or going back can take the browser off the allowed
+	// domains: what it found there is withheld.
+	if c.Tool == "browser" {
+		page, _ := result["url"].(string)
+		if gr, why := g.w.offDomains(st.all, c.Agent, page); why != "" {
+			g.w.auditGuardrail(ctx, gr, "block", why)
+			v.Result = map[string]any{"error": i18n.T("guardrail.refused", "name", gr.Name, "reason", why)}
+			v.Notices = append(v.Notices, v.Result["error"].(string))
+			return v
+		}
+	}
 	active := gates.Active(st.all, gates.StageToolResult, c.Agent)
 	if len(active) == 0 {
 		return v
 	}
 	data, _ := json.Marshal(result)
-	text := textutil.Ellipsize(string(data), guardScanLimit)
+	text := string(data)
 	external := g.external(c.Tool)
 	out := result
 	for _, gr := range active {
@@ -284,7 +494,7 @@ func (g guard) ToolResult(ctx context.Context, c runtime.GuardCall, result map[s
 			}
 			caught, reason = true, i18n.T("guardrail.injection_found", "phrase", phrase)
 			if gr.Judge {
-				if verdict, err := gates.ConfirmInjection(ctx, g.w.ruleAsker(), textutil.Ellipsize(text, guardSubjectLimit)); err == nil && verdict.Pass {
+				if verdict, err := gates.ConfirmInjection(ctx, g.w.ruleAsker(), around(text, phrase, guardSubjectLimit)); err == nil && verdict.Pass {
 					g.w.auditGuardrail(ctx, gr, "pass", verdict.Reason)
 					continue // the judge says it's quoted, not aimed at the agent
 				}
@@ -367,9 +577,17 @@ func redactInjection(result map[string]any) map[string]any {
 	return out
 }
 
+// OutputWindow is how much of a streaming answer the engine holds back
+// before the word still arriving (runtime.HeldTextKey): the longest
+// secret the workspace knows by value, so one with spaces in it is whole
+// when it's checked (guardrails.Window when that's longer).
+func (g guard) OutputWindow() int { return g.w.secretRedactor().Longest() }
+
 // Output applies the output guardrails to a piece of the answer: the
 // secrets guardrail masks (or withholds) on every piece; custom checks
-// judge the whole answer.
+// judge the whole answer. While a custom one that blocks is on, the
+// pieces aren't streamed: the answer is shown once it's judged, so one
+// it withholds is never seen.
 func (g guard) Output(ctx context.Context, c runtime.GuardCall, text string, final bool) runtime.GuardVerdict {
 	st := g.w.guardsFor(c.Session)
 	var v runtime.GuardVerdict
@@ -390,6 +608,7 @@ func (g guard) Output(ctx context.Context, c runtime.GuardCall, text string, fin
 				}
 			case gates.Block:
 				cur = i18n.T("guardrail.withheld_text", "name", gr.Name)
+				v.Withheld = true
 				if st.once(gr.Name) {
 					g.w.auditGuardrail(ctx, gr, "block", "")
 					v.Notices = append(v.Notices, i18n.T("guardrail.withheld_answer", "name", gr.Name))
@@ -403,6 +622,9 @@ func (g guard) Output(ctx context.Context, c runtime.GuardCall, text string, fin
 			continue
 		}
 		if !final {
+			if gr.Action == gates.Block {
+				cur = "" // held until the whole answer is judged
+			}
 			continue // a custom check judges the whole answer
 		}
 		verdict, err := g.w.judgeGuardrail(ctx, gr, cur)
@@ -435,7 +657,7 @@ func (g guard) Output(ctx context.Context, c runtime.GuardCall, text string, fin
 // order: one that fails, or can't be judged, and blocks refuses the
 // prompt; one that warns says so.
 func (w *Workspace) inputGuardrails(ctx context.Context, sessionID, text string, notice func(string, bool)) error {
-	for _, gr := range gates.Active(w.guardsFor(sessionID).all, gates.StageInput, w.engine.ActiveAgent()) {
+	for _, gr := range gates.Active(w.guardsFor(sessionID).all, gates.StageInput, w.turnAgent(ctx)) {
 		verdict, err := w.judgeGuardrail(ctx, gr, text)
 		switch {
 		case err != nil && gr.Action == gates.Block:
@@ -479,4 +701,44 @@ func (w *Workspace) SaveGuardrail(spec GuardrailSpec, previous string) (gates.Gu
 // built-in's: back to its defaults).
 func (w *Workspace) DeleteGuardrail(name string) error {
 	return gates.DeleteGuardrail(w.ProjectGuardrailsDir(), name)
+}
+
+// around is at most n bytes of s around the first phrase in it (the start
+// of s when phrase isn't there), on rune boundaries: what the injection
+// judge confirms a match from.
+func around(s, phrase string, n int) string {
+	i := strings.Index(s, phrase)
+	if i < 0 || len(s) <= n {
+		return textutil.TruncateUTF8(s, n)
+	}
+	start := max(0, min(i-(n-len(phrase))/2, len(s)-n))
+	for start > 0 && !utf8.RuneStart(s[start]) {
+		start--
+	}
+	return textutil.TruncateUTF8(s[start:], n)
+}
+
+// offDomains is the limits guardrail (of all, guarding agent) whose
+// allowed_domains an http(s) URL is off, and why ("" when none).
+func (w *Workspace) offDomains(all []gates.Guardrail, agent, raw string) (gates.Guardrail, string) {
+	if u, err := url.Parse(raw); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return gates.Guardrail{}, ""
+	}
+	for _, gr := range gates.Active(all, gates.StageAction, agent) {
+		if gr.Builtin == gates.BuiltinLimits && !gates.DomainAllowed(raw, gr.Limits.AllowedDomains) {
+			return gr, i18n.T("guardrail.domain", "url", raw, "domains", strings.Join(gr.Limits.AllowedDomains, ", ")) + " " + w.limitSetting(gr, "allowed_domains")
+		}
+	}
+	return gates.Guardrail{}, ""
+}
+
+// approveNetwork is a workflow call's request to u held to the limits
+// guardrail's allowed_domains (as web_fetch is), then approved as a fetch
+// of its host is (tools.ApproveNetwork).
+func (w *Workspace) approveNetwork(ctx context.Context, tool, detail string, u *url.URL) error {
+	if gr, why := w.offDomains(w.Guardrails(), w.engine.ActiveAgent(), u.String()); why != "" {
+		w.auditGuardrail(ctx, gr, "block", why)
+		return &api.BlockedError{Reason: i18n.T("guardrail.refused", "name", gr.Name, "reason", why)}
+	}
+	return w.tools.ApproveNetwork(ctx, tool, detail, u)
 }

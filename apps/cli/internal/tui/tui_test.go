@@ -43,12 +43,12 @@ func TestLineReaderSharedSequentialReads(t *testing.T) {
 
 	for _, want := range []string{"first", "second", "last-no-newline"} {
 		t.Run(want, func(t *testing.T) {
-			got, err := lr.ReadLine("> ")
-			require.NoError(t, err, "ReadLine = %q, %v; want %q", got, err, want)
-			require.Equal(t, want, got, "ReadLine = %q, %v; want %q", got, err, want)
+			got, err := lr.Ask(context.Background(), "> ")
+			require.NoError(t, err, "Ask = %q, %v; want %q", got, err, want)
+			require.Equal(t, want, got, "Ask = %q, %v; want %q", got, err, want)
 		})
 	}
-	_, err := lr.ReadLine("> ")
+	_, err := lr.Ask(context.Background(), "> ")
 	assert.ErrorIs(t, err, io.EOF, "expected EOF, got %v", err)
 	assert.Equal(t, 4, strings.Count(out.String(), "> "), "prompt not echoed each time: %q", out.String())
 }
@@ -317,6 +317,26 @@ func TestRunREPLUsesCurrentSession(t *testing.T) {
 	assert.NoError(t, RunREPL(context.Background(), app), "EOF should end REPL without error, got")
 }
 
+// blitz -i "prompt": the prompt is sent first, and the session stays open
+// for what is typed next (N26 cli-2#4).
+func TestRunREPLSendsTheFirstPrompt(t *testing.T) {
+	app := newTestApp(t, nil)
+	var out bytes.Buffer
+	app.FirstPrompt = "first"
+	app.Input = NewLineReader(strings.NewReader("second\n/exit\n"), &out)
+	require.NoError(t, RunREPL(context.Background(), app))
+	active := local(app).Storage().Active()
+	require.NotNil(t, active)
+	var users []string
+	for _, m := range active.Messages {
+		if m.Role == "user" {
+			users = append(users, m.Content)
+		}
+	}
+	assert.Equal(t, []string{"first", "second"}, users)
+	assert.Empty(t, app.FirstPrompt, "sent once")
+}
+
 func TestLineReaderCancelDoesNotLoseInput(t *testing.T) {
 	pr, pw := io.Pipe()
 	var out bytes.Buffer
@@ -336,7 +356,7 @@ func TestLineReaderCancelDoesNotLoseInput(t *testing.T) {
 
 	// Positive: the line typed afterwards goes to the next reader, not the abandoned one.
 	go pw.Write([]byte("kept\n"))
-	got, err := lr.ReadLine("> ")
+	got, err := lr.Ask(context.Background(), "> ")
 	require.NoError(t, err, "expected 'kept', got %q", got)
 	require.Equal(t, "kept", got, "expected 'kept', got %q %v", got, err)
 	pw.Close()

@@ -28,10 +28,12 @@ import (
 	"github.com/retail-cortex/blitz/pkg/api"
 	"github.com/retail-cortex/blitz/pkg/config"
 	"github.com/retail-cortex/blitz/pkg/config/configtest"
+	"github.com/retail-cortex/blitz/pkg/engine/runtime"
 	"github.com/retail-cortex/blitz/pkg/engine/session"
 	"github.com/retail-cortex/blitz/pkg/engine/workers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 )
 
@@ -185,7 +187,7 @@ func TestRunWorkerEnforcesPermissions(t *testing.T) {
 
 	// Its change is its own: not the sessions' /undo, but the run's undo
 	// (BL-WK-01, BL-WK-02).
-	_, err = w.Undo(false)
+	_, err = w.Undo("", false)
 	assert.ErrorIs(t, err, api.ErrNothingToUndo, "/undo reached the worker's change")
 	assert.FileExists(t, filepath.Join(w.Dir(), "reports", "deps.md"))
 	undone, err := w.UndoWorkerRun(run.ID, false)
@@ -269,6 +271,212 @@ func TestRunWorkerStopsAtItsTimeAndCostLimits(t *testing.T) {
 	assert.NoError(t, err, "cost run %+v", run)
 	assert.Equal(t, api.RunLimited, run.Status, "cost run %+v %v", run, err)
 	assert.Contains(t, run.Error, "cost limit", "cost run %+v %v", run, err)
+}
+
+// A workflow's job may do what the workflow's steps do as they are when
+// it runs (WF-20, N26 desktop-4#19), within the policy, without the job
+// listing it.
+func TestRunWorkerWorkflowGrants(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		allow  []string
+		status api.RunStatus
+		wrote  bool
+	}{
+		{name: "its save step writes", allow: []string{"write"}, status: api.RunSucceeded, wrote: true},
+		{name: "the policy still applies", allow: []string{"shell"}, status: api.RunFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := openTestWith(t, func(c *config.Config) { c.Workers.Policy.Allow = tc.allow })
+			writeFlow(t, w, "save", "nodes:\n  - {id: s, type: save_file, path: out/report.md}\n")
+			addWorker(t, w, "flow", "---\nschedule: hourly\nworkflow: save\n---\nThe report.\n")
+			enable(t, w, "flow")
+			run, err := w.RunWorker(context.Background(), "flow", RunOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.status, run.Status, "run %+v", run)
+			_, statErr := os.Stat(filepath.Join(w.Dir(), "out", "report.md"))
+			assert.Equal(t, tc.wrote, statErr == nil, "the file written: %v", statErr)
+		})
+	}
+}
+
+// A job's hash covers the workflow it runs, whose steps add to what it
+// may do: editing, creating or removing the workflow suspends an enabled
+// job as changed, an edit read before it is refused, and the job runs
+// again once enabled at the new hash (scan N26 desktop-4#19 follow-up).
+func TestWorkflowChangeSuspendsJob(t *testing.T) {
+	const save = "nodes:\n  - {id: s, type: save_file, path: out/report.md}\n"
+	const wider = "nodes:\n  - {id: s, type: save_file, path: out/report.md}\n  - {id: b, type: save_file, path: notes/b.md}\nedges: [{from: s, to: b}]\n"
+	for _, tc := range []struct {
+		name          string
+		before, after string // "" for no workflow file
+	}{
+		{name: "edited", before: save, after: wider},
+		{name: "created", after: save},
+		{name: "removed", before: save},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := openTestWith(t, func(c *config.Config) { c.Workers.Policy.Allow = []string{"write"} })
+			if tc.before != "" {
+				writeFlow(t, w, "save", tc.before)
+			}
+			addWorker(t, w, "flow", "---\nschedule: hourly\nworkflow: save\n---\nThe report.\n")
+			enable(t, w, "flow")
+			_, read, err := w.GetWorkerSpec("flow")
+			require.NoError(t, err)
+
+			if tc.after != "" {
+				writeFlow(t, w, "save", tc.after)
+			} else {
+				require.NoError(t, w.DeleteWorkflow("save"))
+			}
+			list, err := w.ListWorkers()
+			require.NoError(t, err)
+			require.Len(t, list, 1)
+			assert.Equal(t, api.StateChanged, list[0].State, "the job ran on with its workflow changed")
+			assert.NotEqual(t, read, list[0].Hash)
+			_, err = w.RunWorker(context.Background(), "flow", RunOptions{})
+			assert.ErrorIs(t, err, api.ErrWorkerNotEnabled)
+			spec, now, err := w.GetWorkerSpec("flow")
+			require.NoError(t, err)
+			assert.Equal(t, list[0].Hash, now, "GetWorkerSpec and the listing disagree")
+			_, _, err = w.UpdateWorker(spec, read)
+			assert.ErrorIs(t, err, api.ErrHashMismatch, "an edit read before the workflow changed")
+			_, err = w.EnableWorker("flow", read)
+			assert.ErrorIs(t, err, api.ErrHashMismatch, "enabled at the hash before the change")
+
+			enable(t, w, "flow")
+			if tc.after == "" {
+				return
+			}
+			run, err := w.RunWorker(context.Background(), "flow", RunOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, api.RunSucceeded, run.Status, "run %+v", run)
+			assert.FileExists(t, filepath.Join(w.Dir(), "out", "report.md"))
+		})
+	}
+}
+
+// A run reads its job's workflow once: the steps it runs, and what they
+// may write, are those of the bytes its enabled hash covers. An edit made
+// after the hash was checked (afterJobCheck) can't give that run steps
+// or permissions nobody reviewed (spec_023 WK-05b, N26 engine-decisions).
+func TestJobRunUsesTheWorkflowItsHashCovers(t *testing.T) {
+	const save = "nodes:\n  - {id: s, type: save_file, path: out/report.md}\n"
+	const swapped = "nodes:\n  - {id: s, type: save_file, path: notes/b.md}\n"
+	w, _ := openTestWith(t, func(c *config.Config) { c.Workers.Policy.Allow = []string{"write"} })
+	writeFlow(t, w, "save", save)
+	addWorker(t, w, "flow", "---\nschedule: hourly\nworkflow: save\n---\nThe report.\n")
+	enable(t, w, "flow")
+	swap := func() { writeFlow(t, w, "save", swapped) }
+	afterJobCheck = swap
+	t.Cleanup(func() { afterJobCheck = func() {} })
+
+	run, err := w.RunWorker(context.Background(), "flow", RunOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, api.RunSucceeded, run.Status, "run %+v", run)
+	assert.FileExists(t, filepath.Join(w.Dir(), "out", "report.md"), "the reviewed step didn't run")
+	assert.NoFileExists(t, filepath.Join(w.Dir(), "notes", "b.md"), "a step edited in after the check ran")
+
+	// The edit made the job changed: the next run doesn't start.
+	_, err = w.RunWorker(context.Background(), "flow", RunOptions{})
+	assert.ErrorIs(t, err, api.ErrWorkerNotEnabled)
+}
+
+// A job whose body is a workflow keeps the job's limits across its
+// steps, runs them on its model, and its steps' changes are the run's to
+// undo (spec_023 WK-43, WK-54; N26 engine-top-2#2).
+func TestRunWorkerWorkflowIsTheRun(t *testing.T) {
+	call := func(name string, args map[string]any) *genai.Content {
+		return &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: name, Args: args}}}}
+	}
+	list := call("list_files", map[string]any{})
+	sleep := call("run_shell_command", map[string]any{"command": "sleep 5"})
+	twoSteps := "nodes:\n  - {id: a, type: agent, instructions: Look.}\n  - {id: b, type: agent, instructions: Look again.}\nedges: [{from: a, to: b}]\n"
+	for _, tc := range []struct {
+		name    string
+		job     string
+		replies []*genai.Content
+		priced  bool
+		status  api.RunStatus
+		want    []string // in the run's error
+	}{
+		{name: "max_turns spans the steps", job: "limits: {max_turns: 3}",
+			replies: []*genai.Content{list, text("a done"), list, list, text("b done")},
+			status:  api.RunLimited, want: []string{"maximum turns reached (3 model calls)", "the job sets this in " + filepath.Join("workers", "flow", workers.FileName)}},
+		{name: "max_cost_usd spans the steps", job: "limits: {max_cost_usd: 0.0002}", priced: true,
+			replies: []*genai.Content{list, text("a done"), list, list, list, list, text("b done")},
+			status:  api.RunLimited, want: []string{"cost limit", "the job sets this"}},
+		{name: "the timeout ends it limited", job: "permissions: [\"shell:sleep 5\"]\nlimits: {timeout: 300ms}",
+			replies: []*genai.Content{sleep, sleep},
+			status:  api.RunLimited, want: []string{"time limit"}},
+		{name: "within its limits", job: "limits: {max_turns: 5}",
+			replies: []*genai.Content{list, text("a done"), list, text("b done")},
+			status:  api.RunSucceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, llm := openTestWith(t, func(c *config.Config) { c.Workers.Policy.Allow = []string{"shell"} }, tc.replies...)
+			if tc.priced {
+				llm.Usage = &genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CandidatesTokenCount: 10}
+			}
+			writeFlow(t, w, "two", twoSteps)
+			addWorker(t, w, "flow", "---\nschedule: hourly\nworkflow: two\n"+tc.job+"\n---\n")
+			enable(t, w, "flow")
+			run, err := w.RunWorker(context.Background(), "flow", RunOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.status, run.Status, "run %+v", run)
+			for _, s := range tc.want {
+				assert.Contains(t, run.Error, s)
+			}
+			assert.NotContains(t, run.Error, "continue", "nobody to send continue to")
+			assert.Less(t, run.Duration, 4*time.Second)
+		})
+	}
+
+	t.Run("its model, and its changes are the run's", func(t *testing.T) {
+		w, main := openTestWith(t, func(c *config.Config) { c.Workers.Policy.Allow = []string{"write"} })
+		writeFlow(t, w, "one", "nodes:\n  - {id: a, type: agent, instructions: Write.}\n")
+		addWorker(t, w, "flow", "---\nschedule: hourly\nworkflow: one\nmodel: writer\npermissions: [\"write:out/\"]\n---\n")
+		enable(t, w, "flow")
+		writer := runtime.NewMockLLM("writer", call("create_file", map[string]any{"path": "out/a.md", "content": "x\n"}), text("wrote it"))
+		w.newModel = func(context.Context, *config.Config, string) (model.LLM, error) { return writer, nil }
+		run, err := w.RunWorker(context.Background(), "flow", RunOptions{})
+		require.NoError(t, err)
+		require.Equal(t, api.RunSucceeded, run.Status, "run %+v", run)
+		assert.Zero(t, main.Calls(), "the steps ran on the job's model")
+		assert.Equal(t, 2, writer.Calls())
+		assert.Equal(t, []string{"out/a.md"}, run.Files)
+		_, err = w.UndoWorkerRun(run.ID, false)
+		require.NoError(t, err)
+		assert.NoFileExists(t, filepath.Join(w.Dir(), "out", "a.md"))
+	})
+}
+
+// A job's turn gets the guardrails of the agent it runs as, not of the
+// window's active agent (N26 engine-top-2#5).
+func TestRunWorkerGuardrailsOfItsAgent(t *testing.T) {
+	list := &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "list_files", Args: map[string]any{}}}}}
+	for _, tc := range []struct {
+		name, agent string
+		status      api.RunStatus
+	}{
+		{name: "the guarded agent", agent: "qa", status: api.RunLimited},
+		{name: "another agent", agent: "", status: api.RunSucceeded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, _ := openTestWith(t, nil, list, list, text("done"))
+			writeGuardrail(t, w, "limits", "---\nbuiltin: limits\nagents: [qa]\nlimits:\n  max_turns: 1\n---\n")
+			job := "---\nschedule: hourly\n"
+			if tc.agent != "" {
+				job += "agent: " + tc.agent + "\n"
+			}
+			addWorker(t, w, "look", job+"---\nLook around.\n")
+			enable(t, w, "look")
+			run, err := w.RunWorker(context.Background(), "look", RunOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, tc.status, run.Status, "run %+v", run)
+		})
+	}
 }
 
 // A worker made from a form goes in .agents/workers once it's valid, and

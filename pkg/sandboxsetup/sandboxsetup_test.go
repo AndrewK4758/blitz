@@ -57,7 +57,13 @@ func newFakeSystem(t *testing.T, restriction string, withParser, withBwrap bool,
 		require.NoError(t, os.WriteFile(restrict, []byte(restriction+"\n"), 0o644))
 	}
 	old := []any{goos, lookPath, restrictFile, profileDir, parsers, probe, run}
+	oldOwner, oldTop := trustedOwner, walkTop
+	trustedOwner = func(uid uint32) bool { return uid == 0 || uid == uint32(os.Getuid()) }
+	// The folders above the test's own are the machine's: in Bazel's
+	// sandbox on Linux root's show as nobody's, so the walk stops here.
+	walkTop = dir
 	t.Cleanup(func() {
+		trustedOwner, walkTop = oldOwner, oldTop
 		goos, lookPath, restrictFile, profileDir = old[0].(string), old[1].(func(string) (string, error)), old[2].(string), old[3].(string)
 		parsers = old[4].([]string)
 		probe = old[5].(func(context.Context, string) ([]byte, error))
@@ -196,6 +202,41 @@ func TestFix(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, Ready, st.State)
 		assert.Empty(t, f.ran)
+	})
+	// A bwrap others can change isn't given the profile (N26
+	// safety-enterprise#10).
+	t.Run("a bwrap others can write", func(t *testing.T) {
+		f := newFakeSystem(t, "1", true, true, "sudo")
+		require.NoError(t, os.Chmod(filepath.Join(f.dir, "bin", "bwrap"), 0o777))
+		_, err := Fix(context.Background(), Elevation{})
+		assert.ErrorIs(t, err, ErrNotSystemBwrap)
+		assert.Empty(t, f.ran)
+	})
+	t.Run("in a folder others can write", func(t *testing.T) {
+		f := newFakeSystem(t, "1", true, true, "sudo")
+		require.NoError(t, os.Chmod(filepath.Join(f.dir, "bin"), 0o777))
+		_, err := Fix(context.Background(), Elevation{})
+		assert.ErrorIs(t, err, ErrNotSystemBwrap)
+		assert.Empty(t, f.ran)
+	})
+	// Linux's /tmp: anyone may write to it, but the sticky bit keeps what
+	// others own in it from being removed or replaced.
+	t.Run("in a sticky folder others can write", func(t *testing.T) {
+		f := newFakeSystem(t, "1", true, true, "sudo")
+		require.NoError(t, os.Chmod(filepath.Join(f.dir, "bin"), 0o777|os.ModeSticky))
+		run = func(cmd *exec.Cmd) error { f.ran = append(f.ran, cmd.Args); f.works = true; return nil }
+		_, err := Fix(context.Background(), Elevation{})
+		assert.NotErrorIs(t, err, ErrNotSystemBwrap)
+		assert.NotEmpty(t, f.ran, "the profile is installed")
+	})
+	t.Run("a bwrap the person owns", func(t *testing.T) {
+		f := newFakeSystem(t, "1", true, true, "sudo")
+		trustedOwner = func(uid uint32) bool { return uid == 0 }
+		_, err := Fix(context.Background(), Elevation{})
+		if os.Getuid() != 0 {
+			assert.ErrorIs(t, err, ErrNotSystemBwrap)
+			assert.Empty(t, f.ran)
+		}
 	})
 	t.Run("not AppArmor's doing", func(t *testing.T) {
 		f := newFakeSystem(t, "0", true, true, "sudo")

@@ -16,7 +16,7 @@
 
 import { describe, expect, it } from "vitest";
 import { WorkerState } from "./gen/blitz/v1/worker_pb";
-import { applyRewrite, canSave, edited, emptyWorkerForm, footerNote, formFromWorker, missing, permissionChanges, savePauses, validWorkerName, workerName, workerRequest, limitHints, parseRules, rulesText, type WorkerFields } from "./workerForm";
+import { applyRewrite, canSave, edited, emptyWorkerForm, footerNote, formFromWorker, missing, permissionChanges, savePauses, validWorkerName, workerName, workerRequest, limitHints, overCaps, parseDuration, parseRules, rulesText, type WorkerFields } from "./workerForm";
 
 describe("workerName", () => {
   it.each([
@@ -199,8 +199,46 @@ describe("the permission rule builder's rows", () => {
     expect(parseRules(text)).toHaveLength(3);
     expect(workerRequest({ ...emptyWorkerForm, name: "x", schedule: "@daily", prompt: "p", permissions: text }).permissions).toEqual(["web:news.google.com", "network:all"]);
   });
+  // N26 desktop-1#17: the service lowercases the kind; Shell:… was an "Other" row.
+  it("reads a kind in any case", () => {
+    expect(parseRules("Shell:go test ./...\nWEB:example.com")).toEqual([
+      { kind: "shell", pattern: "go test ./..." },
+      { kind: "web", pattern: "example.com" },
+    ]);
+  });
   it("round-trips", () => {
     const text = "shell:go test ./...\nwrite:reports/**\nmcp:github:create_issue";
     expect(rulesText(parseRules(text))).toBe(text);
+  });
+});
+
+describe("parseDuration", () => {
+  it.each([
+    ["30m", 1_800_000],
+    ["1h30m", 5_400_000],
+    ["1.5h", 5_400_000],
+    ["90s", 90_000],
+    ["250ms", 250],
+    ["0", 0],
+    ["", null],
+    ["30", null],
+    ["2 hours", null],
+    ["1d", null],
+  ] as const)("%j", (text, want) => {
+    expect(parseDuration(text)).toBe(want);
+  });
+});
+
+describe("overCaps", () => {
+  const capped = { maxTurns: 200, maxCostUsd: 10, maxTimeout: "2h" };
+  const form = { maxTurns: "", maxCostUSD: "", timeout: "" };
+  it.each([
+    ["nothing asked", form, capped, []],
+    ["within the caps", { maxTurns: "200", maxCostUSD: "9.5", timeout: "90m" }, capped, []],
+    ["over every cap", { maxTurns: "300", maxCostUSD: "12", timeout: "3h" }, capped, ["maxTurns", "maxCostUSD", "timeout"]],
+    ["no caps set", { maxTurns: "300", maxCostUSD: "12", timeout: "3h" }, { maxTurns: 0, maxCostUsd: 0, maxTimeout: "" }, []],
+    ["a time that isn't one", { ...form, timeout: "lots" }, capped, []],
+  ] as const)("%s", (_, f, p, want) => {
+    expect([...overCaps(f, p)]).toEqual(want);
   });
 });

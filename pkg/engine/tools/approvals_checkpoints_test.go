@@ -118,7 +118,7 @@ func TestWriteToolsSendDiffAndKey(t *testing.T) {
 
 func TestCheckpointUndo(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	path := filepath.Join(dir, "f.txt")
 	writeFile(t, path, "v1\n")
 	os.Chmod(path, 0o755)
@@ -139,12 +139,12 @@ func TestCheckpointUndo(t *testing.T) {
 	assert.Contains(t, d, "+v3", "session diff missing change:\n%s", d)
 
 	// Undo turn 2: deleted file comes back.
-	_, err := cp.Undo(false)
+	_, err := cp.Undo("", false)
 	require.NoError(t, err)
 	b, _ := os.ReadFile(filepath.Join(dir, "new.txt"))
 	assert.Equal(t, "n\n", string(b), "deleted file not restored: %q", b)
 	// Undo turn 1: original content and mode restored, created file removed.
-	res, err := cp.Undo(false)
+	res, err := cp.Undo("", false)
 	require.NoError(t, err)
 	b, _ = os.ReadFile(path)
 	assert.Equal(t, "v1\n", string(b), "content not restored: %q", b)
@@ -154,24 +154,24 @@ func TestCheckpointUndo(t *testing.T) {
 	assert.ErrorIs(t, err, fs.ErrNotExist, "created file not removed by undo")
 	assert.Len(t, res.Restored, 2, "restored %v", res.Restored)
 	// Negative: nothing left.
-	_, err = cp.Undo(false)
+	_, err = cp.Undo("", false)
 	assert.Error(t, err, "expected nothing to undo")
 }
 
 func TestCheckpointUndoConflict(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	path := filepath.Join(dir, "f.txt")
 	writeFile(t, path, "orig\n")
 	cp.Begin("edit")
 	ws.WriteFileAtomic(context.Background(), "f.txt", []byte("tool edit\n"))
 	os.WriteFile(path, []byte("user edit after\n"), 0o644) // changed outside the tools
 
-	_, err := cp.Undo(false)
+	_, err := cp.Undo("", false)
 	require.ErrorIs(t, err, api.ErrUndoConflict, "expected conflict, got %v", err)
 	b, _ := os.ReadFile(path)
 	assert.Equal(t, "user edit after\n", string(b), "conflicting undo modified the file")
-	_, err = cp.Undo(true)
+	_, err = cp.Undo("", true)
 	require.NoError(t, err, "forced undo")
 	b, _ = os.ReadFile(path)
 	assert.Equal(t, "orig\n", string(b), "forced undo did not restore: %q", b)
@@ -179,14 +179,14 @@ func TestCheckpointUndoConflict(t *testing.T) {
 
 func TestCheckpointFailedWriteNotRecorded(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 	os.Mkdir(filepath.Join(dir, "adir"), 0o755)
 	cp.Begin("t")
 	require.Error(t, ws.WriteFileAtomic(context.Background(), "adir", []byte("x")), "expected write over directory to fail")
 	require.Error(t, ws.CreateExclusive(context.Background(), "adir", []byte("x")), "expected create over directory to fail")
 	l := cp.List()
 	assert.Len(t, l, 0, "failed writes were recorded: %+v", l)
-	_, err := cp.Undo(false)
+	_, err := cp.Undo("", false)
 	assert.Error(t, err, "undo should have nothing to do")
 	_, err = os.Stat(filepath.Join(dir, "adir"))
 	assert.NoError(t, err, "directory was removed")
@@ -194,7 +194,7 @@ func TestCheckpointFailedWriteNotRecorded(t *testing.T) {
 
 func TestCheckpointMemoryBudget(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
-	cp := NewCheckpoints(ws, 100)
+	cp := newTestCheckpoints(ws, 100)
 	for i, name := range []string{"a", "b", "c"} {
 		writeFile(t, filepath.Join(dir, name), strings.Repeat("x", 60))
 		cp.Begin(name)
@@ -241,4 +241,69 @@ func TestHooksRunOutsideSandbox(t *testing.T) {
 	reg.ScriptHooks().flush(context.Background()) // post_tool hooks run in the background
 	b, _ := os.ReadFile(outside)
 	assert.Contains(t, string(b), "logged", "hook could not write outside the workspace; hooks should not be sandboxed")
+}
+
+// A stand-in gate that shares the workspace's (a background task's
+// worktree) uses and adds to its session grants, and has its hooks,
+// sub-agents, tasks and reviewer (N26 engine-runtime#1b).
+func TestHooksShare(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name  string
+		setup func(ws *Hooks)
+		check func(t *testing.T, ws, wt *Hooks, wtAsked *[]api.ApprovalRequest)
+	}{
+		{
+			name: "the session's grant applies in the worktree",
+			setup: func(ws *Hooks) {
+				require.NoError(t, ws.Approve(ctx, api.ApprovalRequest{Tool: "t", Kind: api.ActionCommand, Key: "cmd:ls"}))
+			},
+			check: func(t *testing.T, _, wt *Hooks, asked *[]api.ApprovalRequest) {
+				require.NoError(t, wt.Approve(ctx, api.ApprovalRequest{Tool: "t", Kind: api.ActionCommand, Key: "cmd:ls"}))
+				assert.Empty(t, *asked, "asked again in the worktree")
+			},
+		},
+		{
+			name: "a grant in the worktree is the session's",
+			check: func(t *testing.T, ws, wt *Hooks, asked *[]api.ApprovalRequest) {
+				require.NoError(t, wt.Approve(ctx, api.ApprovalRequest{Tool: "t", Kind: api.ActionCommand, Key: "cmd:make"}))
+				assert.Len(t, *asked, 1)
+				assert.Contains(t, ws.SessionRules(), "cmd:make")
+			},
+		},
+		{
+			name: "the permission_request hooks answer",
+			setup: func(ws *Hooks) {
+				ws.SetEventHooks(func(context.Context, api.ApprovalRequest) Outcome { return Outcome{Decision: "allow"} }, nil)
+			},
+			check: func(t *testing.T, _, wt *Hooks, asked *[]api.ApprovalRequest) {
+				require.NoError(t, wt.Approve(ctx, api.ApprovalRequest{Tool: "t", Kind: api.ActionCommand, Key: "cmd:x"}))
+				assert.Empty(t, *asked, "the hook didn't answer")
+			},
+		},
+		{
+			name: "sub-agents, tasks and the reviewer",
+			setup: func(ws *Hooks) {
+				ws.SetSubagentInvoker(func(context.Context, string, string) (string, error) { return "", nil })
+				ws.SetReviewer(func(context.Context, api.ApprovalRequest) (bool, string, error) { return true, "fine", nil })
+			},
+			check: func(t *testing.T, _, wt *Hooks, _ *[]api.ApprovalRequest) {
+				assert.NotNil(t, wt.subagentInvoker())
+				wt.mu.RLock()
+				defer wt.mu.RUnlock()
+				assert.NotNil(t, wt.reviewer)
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ws, _ := decisionHooks(api.DecisionSession)
+			if c.setup != nil {
+				c.setup(ws)
+			}
+			wt, asked := decisionHooks(api.DecisionSession)
+			wt.Share(ws)
+			c.check(t, ws, wt, asked)
+		})
+	}
 }

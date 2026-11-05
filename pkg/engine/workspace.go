@@ -227,6 +227,7 @@ func Open(ctx context.Context, cfg *config.Config, o Options) (*Workspace, error
 	if o.Warn == nil {
 		o.Warn = func(string) {}
 	}
+	observability.RememberSecrets(cfg) // the process's log and telemetry mask this workspace's keys too
 	w := &Workspace{cfg: cfg, locales: SetupLocale(cfg, o.Warn), warn: o.Warn}
 	w.reply = i18n.Current()
 	if w.newModel = o.NewModel; w.newModel == nil {
@@ -270,11 +271,20 @@ func Open(ctx context.Context, cfg *config.Config, o Options) (*Workspace, error
 	if w.agents, err = agents.NewRegistry(); err != nil {
 		return nil, fmt.Errorf("failed to load agent registry: %w", err)
 	}
+	if cfg.Org.Locked != "" {
+		// Its locked agents keep their names over plugins' (EN-31).
+		w.agents.Lock(filepath.Join(cfg.Org.Locked, "agents"))
+	}
 	if err := w.agents.LoadExternalAgents(cfg.AgentSearchPaths(dir)...); err != nil {
 		o.Warn(err.Error())
 	}
 	if w.skills, err = skills.NewProvider(); err != nil {
 		return nil, fmt.Errorf("failed to load skills provider: %w", err)
+	}
+	// What the settings files hold that loading didn't use (CFG-48), and
+	// an organization policy that can't be read (EN-33).
+	for _, msg := range cfg.Warnings {
+		o.Warn(msg)
 	}
 	// The built-in agents and skills the organization switches off
 	// (spec_053 EN-31), but the agent sessions start with.
@@ -287,12 +297,20 @@ func Open(ctx context.Context, cfg *config.Config, o Options) (*Workspace, error
 		w.skills.SwitchOff(off)
 	}
 	if cfg.Skills.Enabled {
+		// The organization's locked skills win over any other of their
+		// name, a plugin's (loaded later) included (spec_053 EN-31).
+		if cfg.Org.Locked != "" {
+			w.skills.Lock(filepath.Join(cfg.Org.Locked, "skills"))
+		}
 		if err := w.skills.DiscoverExternal(cfg.SkillSearchPaths(dir)); err != nil {
 			o.Warn(err.Error())
 		}
 		for _, p := range cfg.Skills.Policy.Problems() {
 			o.Warn(p)
 		}
+	}
+	for _, p := range cfg.Workers.Policy.Problems() {
+		o.Warn(p)
 	}
 
 	// Before the tools: they start the hooks and MCP servers.
@@ -351,6 +369,12 @@ func Open(ctx context.Context, cfg *config.Config, o Options) (*Workspace, error
 	w.tools.SetPageOpener(w.openPage)
 	if note := w.tools.ModeNote(); note != nil {
 		o.Warn(i18n.T("mode.bypass_unavailable"))
+	}
+	for _, p := range tools.ProcessLimitProblems(cfg.Processes) {
+		o.Warn(p)
+	}
+	if err := w.tools.CheckpointsErr(); err != nil {
+		o.Warn("checkpoints are kept in memory only, so /undo can't reach earlier sessions' changes or keep this one's: " + err.Error())
 	}
 	if st := w.tools.Images(); st != nil && cfg.Images.RetainDays > 0 {
 		if _, err := st.Prune(time.Duration(cfg.Images.RetainDays) * 24 * time.Hour); err != nil {
@@ -457,8 +481,8 @@ func Open(ctx context.Context, cfg *config.Config, o Options) (*Workspace, error
 	w.tools.ScriptHooks().Info = func(_ context.Context, session string) tools.HookInfo {
 		return tools.HookInfo{TranscriptPath: w.storage.TranscriptPath(session), PermissionMode: string(w.tools.Hooks().Mode()), Agent: w.engine.ActiveAgent()}
 	}
-	w.settingsWatch = w.watchSettings()
 	w.bgCtx, w.bgStop = context.WithCancel(context.Background())
+	w.settingsWatch = w.watchSettings() // its reloads stop with bgCtx
 	w.tools.SetSearcher(w.Search)
 	w.openSearch(ctx)
 	opened = true
@@ -523,7 +547,12 @@ func (w *Workspace) Close() error {
 		w.dropUploads(time.Time{})
 		err = w.tools.Close()
 	}
-	w.audit.Close()
+	if w.storage != nil {
+		// Its active session is no longer its to write: a workspace
+		// opened after it in this process writes it again, rather than
+		// hand its metadata to this one's stale copy.
+		w.storage.Release()
+	}
 	w.lock.release()
 	return err
 }
@@ -622,9 +651,7 @@ func FindBrowser(path string) (string, error) { return browser.Find(path) }
 // project's settings wait for trust or were declined, since a project the
 // person hasn't trusted could steer the agent into their sign-ins.
 func (w *Workspace) browserProfile() tools.BrowserProfile {
-	switch w.project.State {
-	case "", "none", "trusted":
-	default:
+	if !w.projectTrusted() {
 		return tools.BrowserProfile{}
 	}
 	store := config.OpenBrowserProfiles(settingsDir(w.cfg))
@@ -667,6 +694,9 @@ func (w *Workspace) loadMemory() {
 		return b
 	}})
 	w.memoryStamp = memory.Stamp(w.Dir(), w.cfg.Memory, w.memory)
+	for _, p := range w.memory.Problems {
+		w.warnOnce(p) // read again at each change: said once
+	}
 }
 
 // unavailable stands in for the configured model when it can't be built:
@@ -704,8 +734,9 @@ func SetupLocale(cfg *config.Config, warn func(string)) *i18n.Bundle {
 	return i18n.Setup(config.ExpandHome(cfg.UI.LocalesDir), cfg.UI.Locale, warn)
 }
 
-// SecretRedactor masks configured credentials and the values of scrubbed
-// environment variables in audit entries, logs and telemetry.
+// SecretRedactor masks configured credentials, the values of scrubbed
+// environment variables and MCP servers' values in audit entries, logs and
+// telemetry (observability.SecretRedactor).
 func SecretRedactor(cfg *config.Config) *redact.Redactor { return observability.SecretRedactor(cfg) }
 
 // ModelErrorSummary makes a model error safe and readable: some SDK errors
@@ -722,8 +753,7 @@ func ModelErrorSummary(err error, cfg *config.Config) string {
 	} else if i := strings.IndexByte(msg, '\n'); i >= 0 {
 		msg = msg[:i]
 	}
-	r := redact.FromEnv(cfg.Sandbox.ScrubEnv, cfg.LLM.Gemini.APIKey, cfg.LLM.OpenAI.APIKey, cfg.LLM.Anthropic.APIKey)
-	return r.String(msg)
+	return SecretRedactor(cfg).String(msg)
 }
 
 // mcpWithSecrets is servers with {secrets:key} in their env and header

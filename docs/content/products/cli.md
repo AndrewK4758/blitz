@@ -11,6 +11,7 @@ weight: 10
 blitz                                   # an interactive session in the current directory
 blitz -d ~/src/app                      # ...in another workspace
 blitz "fix the failing test"            # run once and exit
+blitz -i "fix the failing test"         # send it, then stay in the session
 git diff | blitz review this change     # piped input becomes part of the prompt
 blitz -p - < task.md                    # the prompt from stdin
 blitz --continue "now add docs"         # continue this directory's most recent session
@@ -22,6 +23,25 @@ blitz --add-dir ../shared-lib           # let the agent work in another director
 ```
 
 `blitz` runs no workspace itself: it attaches to the [service](service.md), starting it if it isn't running (without a login item, a service started this way stops after 15 minutes with nothing to do). A run with settings of its own (`--local`, `--model`, `--agent`, `--append-system-prompt`, `--add-dir`, `--plugin-dir`, `--no-session-persistence`, `--trust-project`) gets a private service that stops when the run does; if the shared service has the workspace open and idle, it hands it over, and while a turn runs there the run is refused. `blitz doctor` runs its checks in `blitzd`, so it works with no service running.
+
+### Run flags
+
+The flags a run takes, on `blitz` and on `blitz exec`:
+
+| Flag | |
+|---|---|
+| `-d, --dir DIR`, `-c, --config DIR` | The workspace (default the current directory) and the folder of the settings file (default `~/.blitz`); every command takes them |
+| `-p, --prompt TEXT` (`-` reads stdin), `-i, --interactive` | A one-shot prompt; `-i` (on `blitz`, not `exec`) opens the interactive session even when a prompt is given |
+| `-a, --agent NAME`, `-m, --model REF`, `--agency LEVEL`, `--effort LEVEL` | The agent, the model, how much it does on its own (`low`…`extreme`), and the reasoning effort |
+| `-r, --resume [ID\|NAME]`, `-C, --continue`, `--fork`, `--name TITLE` | Resume a session (or start one from a snapshot), continue the latest; `--fork` continues in a copy of it, leaving it as it was; `--name` names the new session |
+| `--allow RULE`, `--deny RULE` | A [permission rule](../guide/safety.md) for this run only, such as `--allow "shell(go test *)"` or `--deny "shell(git push *)"` (repeatable) |
+| `--permission-mode MODE` | Start in `auto` (the default), `default`, `accept-edits`, `plan`, `dont-ask` or `bypass` (needs the OS sandbox) |
+| `--plan`, `--image FILE`, `--bg` | A plan-only run; an image for the first prompt (repeatable); a background run in the service |
+| `-w, --worktree[=NAME]`, `--ref REF` | Start in a new git worktree, from `REF` |
+| `--add-dir DIR`, `--plugin-dir DIR`, `--append-system-prompt[-file]`, `--local`, `--trust-project` | Settings of the run's own: they run in a private service (above) |
+| `--output-format`, `--input-format`, `--json-schema`, `--max-turns`, `--max-cost-usd`, `--timeout`, `--no-session-persistence` | [Scripting](#scripting) |
+
+`blitz exec <prompt>` is `blitz` for one prompt that must be given: it runs it and exits, never opening the interactive session.
 
 ## Scripting
 
@@ -36,6 +56,16 @@ blitz --permission-mode dont-ask "…"    # refuse whatever would ask, instead o
 blitz --output-format json --json-schema person.json "Who wrote this repo?"   # structured_result: JSON valid against the schema
 blitz --no-session-persistence "…"      # leave no session behind
 ```
+
+With `stream-json`, the lines are `session` first, then `text`, `tool_call` and `tool_result` as the turn goes, and these, then `result`:
+
+| `type` | Keys | What it is |
+|---|---|---|
+| `notice` | `text`, `error`, `transient`, `author` | A message from Blitz about the turn, such as a guardrail stopping it ("Send continue to go on"); `transient` marks a passing status, such as a retry |
+| `workflow_step` | `workflow`, `id`, `title`, `step_type`, `index`, `count`, `status`, `output`, `error`, `run` | A workflow's step starting (`running`) or ending (`done`, `failed`, `skipped`, `waiting`), step `index` of `count` |
+| `tasks` | `tasks` (`[{"content", "status"}]`), `author` | The agent's whole task list each time it changes; `status` is `pending`, `in_progress` or `done` |
+
+Every key is always there. Skip a `type` you don't know: new ones may come.
 
 Another program can drive a whole session over pipes: with `--input-format stream-json --output-format stream-json`, each stdin line is a prompt or an answer, and approvals and questions come out as lines to answer:
 
@@ -72,9 +102,20 @@ Decisions are `once`, `session`, `always` or `deny`; a question is answered with
 | `blitz search <terms>` | [Searches the workspace](../guide/search.md#workspace-search): files, PDFs and notebooks, chats, notes (`--in`, `--json`, `--status`, `--reindex`) |
 | `blitz jobs …` | Lists, enables, runs, undoes and shows the history of [jobs](../guide/workers.md) |
 | `blitz mcp add\|list\|get\|remove\|enable\|disable\|login\|logout …` | Adds and manages [MCP servers](../guide/mcp.md); `login` signs in to one over OAuth |
-| `blitz service install\|uninstall\|status` | Starts the service at login, or stops doing so |
+| `blitz service install\|uninstall\|restart\|status` | Starts the service at login, or stops doing so; `restart` restarts it so it reads changed settings, MCP servers and plugins |
 | `blitz init` | Runs `/setup` unattended: sets up the project for agents (`.agents/AGENTS.md` and the files that import it) |
 | `blitz license [full\|third-party]` | The NOTICE, the Apache License, or the notices of the software Blitz includes |
+| `blitz config set-auth <provider> <api_key\|adc\|oauth>` | How a provider signs in: an API key, Google Cloud ADC, or OAuth ([providers](../guide/providers.md)) |
+| `blitz config permissions [allow\|ask\|deny\|remove <rule>]`, `… check <rule> [sample]`, `… defaults on\|off\|inherit` | The saved [permission rules](../guide/safety.md) (`--workspace` for the workspace's own): list, change, test a rule against a command or path, or turn the built-in read-only rules off |
+| `blitz auth status\|login <provider>\|logout <provider>` | Sign in to or out of Google, Anthropic, AWS or Azure with its own tool ([providers](../guide/providers.md)) |
+| `blitz trust [dir]` | Show a workspace's project settings and trust or decline them |
+| `blitz sessions export <id> [-o file]` | A session as Markdown, or Word for a `.docx` name, without opening the workspace |
+| `blitz jobs move <name> [--anyway]` | Move a job to your organization's service, saying first what can't run there ([organization](../guide/organization.md)) |
+| `blitz enterprise connect\|disconnect\|login [--browser]\|logout\|status\|terms\|about` | Your [organization's service](../guide/organization.md): connect, sign in, its status, accepting its terms, and what it says about itself (about text, support, privacy notice) |
+| `blitz enterprise workspaces\|open <workspace>\|create <name> [--personal] [--handle h]\|share [folder] [--name n] [--handle h] [--personal]`, `blitz enterprise sync [status]` | The organization's workspaces: list, clone, make, share a folder where it is, and save it to the service now |
+| `blitz enterprise jobs [runs\|push\|run\|on\|off\|files\|pending\|approve\|deny\|take\|watch …] [--workspace h]`, `blitz enterprise notices` | The jobs the service runs for you, and how you hear of their runs (`--email=false` turns email off) |
+| `blitz enterprise usage`, `blitz enterprise publish [<kind>/<name>…] [--lock] [--groups] [--title]`, `blitz enterprise reviews [--state s]`, `blitz enterprise catalog [--kind k]\|copy <kind>/<name>` | Your use of the organization's models; publishing to its catalog and the reviews; what the catalog gives this workspace (`-d` names the workspace) |
+| `blitz git-credential get\|store\|erase` | Git's credential helper for the organization's service |
 | `blitz completion bash\|zsh\|fish\|powershell` | Shell completion |
 
 ## The interactive session
@@ -84,8 +125,8 @@ Decisions are `once`, `session`, `always` or `deny`; a question is answered with
 - **Streaming Markdown**, a progress spinner, and a usage line after each turn: `↳ 12.4k in · 1.2k out · context 12.3k · $0.0023`.
 - **Steering**: while the agent works, start typing (or press Ctrl+T) to send it a message. It reaches the agent with the next tool result, so nothing is interrupted. (macOS and Linux.)
 - **Ctrl+C** or **Esc** cancels the running turn; at the prompt, Ctrl+C exits.
-- **Pickers**: `/resume`, `/agent` and `/model` without an argument, approvals and the agent's questions open a menu under the prompt. Arrow keys move, typing filters, Enter chooses.
-- **Shift+Tab** cycles the permission mode (`default` → `accept-edits` → `plan`). **Ctrl+G** opens the prompt in `$VISUAL` or `$EDITOR`. **Esc Esc** clears the line, or on an empty line opens `/rewind`.
+- **Pickers**: `/resume`, `/agent` and `/model` without an argument, approvals and the agent's questions open a menu under the prompt. Arrow keys move, typing filters, Enter chooses. An approval starts on **No**, so an Enter typed ahead never approves.
+- **Shift+Tab** cycles the permission mode (`default` → `accept-edits` → `auto` → `plan`). **Ctrl+G** opens the prompt in `$VISUAL` or `$EDITOR`. **Esc Esc** clears the line, or on an empty line opens `/rewind`.
 - **Vim and keys**: `ui.editor = "vim"` edits the prompt vi-style. `~/.blitz/keybindings.toml` moves the REPL's keys and binds keys to commands:
 
   ```toml
@@ -96,13 +137,13 @@ Decisions are `once`, `session`, `always` or `deny`; a question is answered with
   ```
 
 - **Status line**: `ui.status_line = "default"` shows the model, mode, context and cost above each prompt; set it to a command instead and its first line of output is shown, with the session's state as JSON on its stdin (fields in [spec_019_tui](../about/specs/spec_019_tui.md) TUI-48).
-- **Notifications**: when a turn has run longer than `ui.notify_after` seconds (30), its end and any approval or question it waits on ring the bell and show a desktop notification. `ui.notify` picks `both`, `bell`, `desktop` or `off`.
+- **Notifications**: when a turn has run longer than `ui.notify_after` seconds (30), its end and any approval or question it waits on ring the bell and show a desktop notification. `ui.notify` picks `both`, `bell`, `desktop` or `off` (another value is a warning at start, and `both`).
 
 ### Commands
 
 | Command | |
 |---|---|
-| `/undo [--force]` | Revert the last turn's file changes (checkpoints are kept between runs) |
+| `/undo [--force]` | Revert this session's last turn's file changes, not another chat's (checkpoints are kept between runs) |
 | `/rewind [n [mode]] [--force]` | Go back to before an earlier prompt: its files, the conversation, or both, or summarize from or up to it |
 | `/checkpoints`, `/diff [git]` | Turns that changed files; everything tools changed in this session, a file at a time (or `git diff`) |
 | `/cost`, `/context` | Token usage, estimated cost, context size against the compaction threshold and what it's made of |
@@ -111,11 +152,13 @@ Decisions are `once`, `session`, `always` or `deny`; a question is answered with
 | `/theme [name [--save]]` | Markdown and diff colours: `auto`, `dark`, `light`, `dracula`, `tokyo-night`, `pink`, `ascii`, `notty` |
 | `/copy [n]` | Copy the last answer (or the nth from last) to the clipboard; OSC 52 over SSH |
 | `/compact [focus]` | Summarize everything before the latest turn now |
+| `/reload` | Read the agents, skills, instructions and rules again (each message already picks up changes) |
+| `/clear` | Clear the terminal screen |
 | `/memory [reload\|add <note>\|notes\|forget <name>]`, `/init` | Project instructions and the agent's notes; `/init` runs `/setup` |
 | `/approvals [revoke <n>\|clear]` | Remembered approval rules |
 | `/hooks` | The hooks, where they come from, and their recent failures |
 | `/fork [n]` | Continue in a copy of the session, up to prompt `n` |
-| `/export [file]` | The session as Markdown, or a Word document for a `.docx` name: prompts, answers, tool calls (`blitz sessions export <id>` from the shell) |
+| `/export [file] [--force]` | The session as Markdown, or a Word document for a `.docx` name: prompts, answers, tool calls (`blitz sessions export <id>` from the shell). An existing file is kept unless `--force` |
 | `/style [name]` | How the agent writes its answers: `default`, `concise`, `explanatory`, or yours in `~/.blitz/styles` |
 | `/session list [--all]\|new\|load <id\|name>\|save <name>`, `/resume`, `/rename` | Sessions and snapshots, scoped to the workspace |
 | `blitz skills registry add\|list\|remove`, `blitz skills search\|install\|update\|uninstall\|list` | Skills from registries such as Castor, hash-checked ([skills](../guide/skills.md#skills-from-a-registry)) |

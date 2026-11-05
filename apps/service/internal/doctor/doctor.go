@@ -38,6 +38,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/engine/runtime"
 	"github.com/retail-cortex/blitz/pkg/engine/skills"
 	"github.com/retail-cortex/blitz/pkg/engine/tools"
+	"github.com/retail-cortex/blitz/pkg/guardrails"
 	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/observability"
 	"github.com/retail-cortex/blitz/pkg/plugins"
@@ -61,6 +62,17 @@ type Check struct {
 	name   string
 	status checkStatus
 	detail string
+}
+
+// ollamaURL is the address the ollama provider talks to, as the model's
+// factory resolves it (runtime's openAIKey): [llm.ollama] base_url, else
+// [llm.openai]'s unless that is OpenAI's own, else Ollama on this machine.
+func ollamaURL(llm config.LLMConfig) string {
+	u := cmp.Or(llm.Ollama.BaseURL, llm.OpenAI.BaseURL)
+	if u == "" || u == "https://api.openai.com/v1" {
+		return "http://localhost:11434/v1"
+	}
+	return u
 }
 
 // Run runs every check, with o's settings.
@@ -90,8 +102,12 @@ func Run(ctx context.Context, o Options) []Check {
 		return checks
 	}
 	add("config parse", statusOK, "provider %s, model %s, agent %s", cfg.LLM.Provider, cfg.ModelName(), cfg.Blitz.DefaultAgent)
+	for _, w := range cfg.Warnings {
+		add("settings", statusWarn, "%s", w)
+	}
 	checkProject(cfg, add)
 	checkSkills(cfg, add)
+	checkGuardrails(cfg, add)
 
 	// Offline, credentials are only found, not tried; with --online the
 	// model request below tries them.
@@ -124,7 +140,7 @@ func Run(ctx context.Context, o Options) []Check {
 			add("credentials", statusWarn, "no api_key; relying on an `ant auth login` profile or workload identity%s", confirm)
 		}
 	case cfg.LLM.Provider == "ollama":
-		add("credentials", statusOK, "ollama needs no API key (%s)", cfg.LLM.OpenAI.BaseURL)
+		add("credentials", statusOK, "ollama needs no API key (%s)", ollamaURL(cfg.LLM))
 	case cfg.LLM.Provider == "bedrock":
 		add("credentials", statusOK, "AWS's credential chain, region %q%s", cfg.LLM.Bedrock.Region, confirm)
 	case cfg.LLM.Provider == "azure":
@@ -341,7 +357,11 @@ func Run(ctx context.Context, o Options) []Check {
 		add("audit log", statusWarn, "disabled")
 	}
 
-	if mem := memory.LoadAll(config.ExpandHome(cfg.Tools.WorkspaceDir), cfg.Memory); len(mem.Docs)+len(mem.Rules) > 0 {
+	mem := memory.LoadAll(config.ExpandHome(cfg.Tools.WorkspaceDir), cfg.Memory)
+	for _, p := range mem.Problems {
+		add("rule", statusWarn, "%s", p)
+	}
+	if len(mem.Docs)+len(mem.Rules) > 0 {
 		var paths []string
 		for _, d := range mem.Docs {
 			paths = append(paths, d.Path)
@@ -514,9 +534,13 @@ func refPrefix(ref string) string {
 	return ref + ": "
 }
 
-// checkSkills reports skills that don't load, the skills policy's own
-// problems, and skills whose scripts the policy blocks.
+// checkSkills reports the jobs policy's durations that can't be read,
+// skills that don't load, the skills policy's own problems, and skills
+// whose scripts the policy blocks.
 func checkSkills(cfg *config.Config, add func(name string, st checkStatus, format string, args ...any)) {
+	for _, p := range cfg.Workers.Policy.Problems() {
+		add("jobs policy", statusWarn, "%s", p)
+	}
 	if !cfg.Skills.Enabled {
 		return
 	}
@@ -562,6 +586,17 @@ func checkSkills(cfg *config.Config, add func(name string, st checkStatus, forma
 		add("script sandbox", statusOK, "%s (%s)", box.Name(), note)
 	default:
 		add("script sandbox", statusOK, "%s", box.Name())
+	}
+}
+
+// checkGuardrails reports each guardrail file with a problem: a custom one
+// is skipped, a built-in one runs with its defaults, and either way the
+// file doesn't do what it says (spec_041_gates).
+func checkGuardrails(cfg *config.Config, add func(string, checkStatus, string, ...any)) {
+	for _, g := range guardrails.Load(engine.GuardrailDirs(cfg, config.ExpandHome(cfg.Tools.WorkspaceDir))...) {
+		if g.Problem != "" {
+			add("guardrails", statusWarn, "%s: %s", cmp.Or(g.Path, g.Name), g.Problem)
+		}
 	}
 }
 

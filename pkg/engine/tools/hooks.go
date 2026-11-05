@@ -25,6 +25,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/api"
 
 	"github.com/retail-cortex/blitz/pkg/engine/audit"
+	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/observability"
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -62,6 +63,44 @@ type Hooks struct {
 	// hooks (in the background). Nil: none.
 	permHook func(context.Context, api.ApprovalRequest) Outcome
 	notify   func(ctx context.Context, typ, message string)
+	// shared is the gate whose session grants h uses and adds to (Share);
+	// nil: its own.
+	shared *Hooks
+}
+
+// Share makes h decide as from does, for a registry that stands in for
+// from's elsewhere (a background task's worktree): from's sub-agents,
+// tasks and reviewer, its permission_request and notification hooks,
+// its saved rules, and its session's grants, which h uses and adds to.
+func (h *Hooks) Share(from *Hooks) {
+	from.mu.RLock()
+	invoker, tasks, reviewer, store, permHook, notify := from.invoker, from.tasks, from.reviewer, from.store, from.permHook, from.notify
+	root := from.grantsHolder()
+	from.mu.RUnlock()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.invoker, h.tasks, h.reviewer, h.store, h.permHook, h.notify = invoker, tasks, reviewer, store, permHook, notify
+	h.shared = root
+}
+
+// grantsHolder is the gate holding h's session grants. Callers may hold
+// h.mu: shared is set once, before h is used.
+func (h *Hooks) grantsHolder() *Hooks {
+	if h.shared != nil {
+		return h.shared
+	}
+	return h
+}
+
+// remembered reports whether the session allowed key.
+func (h *Hooks) remembered(key string) bool {
+	if key == "" {
+		return false
+	}
+	g := h.grantsHolder()
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.session[key]
 }
 
 // SetEventHooks connects the gate to permission_request and notification
@@ -210,9 +249,6 @@ func (h *Hooks) RevokeSession(key string) bool {
 	return ok
 }
 
-// Approve returns nil when the action may proceed. It fails closed: with no
-// approver configured and no auto-approve policy or remembered rule covering
-// the action, the action is denied.
 // unattendedKey carries an unattended run's decision function.
 type unattendedKey struct{}
 
@@ -294,6 +330,13 @@ func taskAskerFrom(ctx context.Context) (TaskAsker, bool) {
 	return a, ok
 }
 
+// refusals are the audit decisions that refuse the action: logged as
+// denials, the rest as approvals.
+var refusals = map[string]bool{
+	"deny": true, "no-approver": true, "error": true,
+	"mode-dont-ask": true, "hook-deny": true, "background-refused": true,
+}
+
 // Approve decides whether a tool call may proceed, and records the
 // decision in the audit log. A deny rule refuses it in any mode. An
 // unattended run (a worker) decides by its own permissions and can't ask
@@ -319,7 +362,7 @@ func (h *Hooks) Approve(ctx context.Context, req api.ApprovalRequest) error {
 	h.mu.RLock()
 	rules := h.rules
 	h.mu.RUnlock()
-	effect, rule := rules.Decide(ruleKind(req), req.Targets)
+	effect, rule := rules.decideRequest(req)
 	if effect == EffectDeny {
 		decided(audit.Entry{Kind: audit.KindDenial, Tool: req.Tool, Detail: req.Detail, Decision: "rule-deny " + rule.String()})
 		return fmt.Errorf("%w: %s is denied by the permission rule deny %s", ErrNotApproved, req.Detail, rule)
@@ -345,12 +388,12 @@ func (h *Hooks) Approve(ctx context.Context, req api.ApprovalRequest) error {
 	if m, ok := ctx.Value(modeKey{}).(api.PermissionMode); ok {
 		policy.Mode = m
 	}
-	remembered := req.Key != "" && h.session[req.Key]
 	h.mu.RUnlock()
+	remembered := h.remembered(req.Key)
 
 	record := func(decision string) {
 		kind := audit.KindApproval
-		if decision == "deny" || decision == "no-approver" || decision == "error" {
+		if refusals[decision] {
 			kind = audit.KindDenial
 		}
 		decided(audit.Entry{Kind: kind, Tool: req.Tool, Detail: req.Detail, Decision: decision})
@@ -373,7 +416,8 @@ func (h *Hooks) Approve(ctx context.Context, req api.ApprovalRequest) error {
 	case policy.Mode == api.ModeBypass:
 		record("mode-bypass")
 		return nil
-	case req.Kind == api.ActionCommand && policy.AutoApproveCommands:
+	case req.Kind == api.ActionCommand && req.Tool != "browser" && policy.AutoApproveCommands:
+		// Shell commands, not a page's JavaScript (its sign-ins included).
 		record("auto-policy")
 		return nil
 	case remembered:
@@ -391,13 +435,17 @@ func (h *Hooks) Approve(ctx context.Context, req api.ApprovalRequest) error {
 		return fmt.Errorf("%w: %s would need approval, and the permission mode is dont-ask", ErrNotApproved, req.Tool)
 	}
 
-	// The user's permission_request hooks may answer instead of the user.
+	// The user's permission_request hooks may answer instead of the user,
+	// but only refuse what an ask rule says the user must see.
 	h.mu.RLock()
 	permHook, notify, reviewer := h.permHook, h.notify, h.reviewer
 	h.mu.RUnlock()
 	if permHook != nil {
 		switch out := permHook(ctx, req); out.Decision {
 		case "allow":
+			if mustAsk {
+				break
+			}
 			record("hook-allow")
 			return nil
 		case "deny":
@@ -461,14 +509,18 @@ func (h *Hooks) Approve(ctx context.Context, req api.ApprovalRequest) error {
 		if req.Key == "" {
 			return nil
 		}
-		h.mu.Lock()
-		h.session[req.Key] = true
-		h.mu.Unlock()
+		g := h.grantsHolder()
+		g.mu.Lock()
+		g.session[req.Key] = true
+		g.mu.Unlock()
 		if decision == api.DecisionAlways && store != nil {
 			if err := store.Add(req.Key, req.KeyLabel); err != nil {
-				// The user approved: allow it (for the session), but say the
-				// rule won't outlive it.
+				// The user approved: allow it (for the session), but tell
+				// them the rule won't outlive it.
 				slog.WarnContext(ctx, "approved, but saving the rule failed; it lasts only this session", "rule", req.Key, "error", err)
+				if f := turnNotices(ctx); f != nil {
+					f(i18n.T("approvals.save_failed", "error", err.Error()))
+				}
 			}
 		}
 		return nil

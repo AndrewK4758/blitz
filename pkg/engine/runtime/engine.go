@@ -103,6 +103,56 @@ type runState struct {
 	// failures counts the run's failed calls by tool, arguments and error
 	// (*atomic.Int32), to tell the agent when it repeats one.
 	failures sync.Map
+	// holds are the answers streaming in the run, held back while their
+	// end may be a secret still arriving (see guardOutput).
+	holds sync.Map
+	// parent is the run a sub-agent with its own budget was called from,
+	// or a budget several runs share (see Budget): its model calls count
+	// toward each run up the chain too.
+	parent *runState
+}
+
+// child is the state of a run started from st (nil: none): the same
+// session, the same restrictions (plan-only or read-only, allowed tools)
+// and overrides (agent, model, task), with its own model-call budget.
+// The caller sets parent when the calls should still count toward st's.
+func (st *runState) child(maxTurns int) *runState {
+	c := &runState{maxTurns: maxTurns}
+	if st != nil {
+		c.sessionID, c.planOnly, c.mode, c.allowed = st.sessionID, st.planOnly, st.mode, st.allowed
+		c.agent, c.model, c.models, c.taskID = st.agent, st.model, st.models, st.taskID
+	}
+	return c
+}
+
+// Budget is a model-call budget several Execute calls share: the runs of
+// one turn (its first, an approved plan's, a stop hook's, a goal's or a
+// rule's continuation), or a job's workflow steps.
+type Budget struct{ st *runState }
+
+// NewBudget is a budget of max model calls (0: no limit of its own) whose
+// calls count toward within too (nil: none).
+func NewBudget(max int, within *Budget) *Budget {
+	b := &Budget{st: &runState{maxTurns: max}}
+	if within != nil {
+		b.st.parent = within.st
+	}
+	return b
+}
+
+// Exhausted reports whether a run was stopped at this budget's own limit
+// (not one it counts toward).
+func (b *Budget) Exhausted() bool {
+	return b != nil && b.st.maxTurns > 0 && b.st.turns.Load() > int64(b.st.maxTurns)
+}
+
+// WithBudget counts the run's model calls toward b (nil: none).
+func WithBudget(b *Budget) ExecOption {
+	return func(s *runState) {
+		if b != nil {
+			s.parent = b.st
+		}
+	}
 }
 
 // repeatWarnAt is how many times the same call may fail the same way in a
@@ -269,7 +319,9 @@ type Engine struct {
 	scoped scopedRules // path-scoped project rules
 
 	fallbackMu sync.Mutex
-	fallbackBy string // fallback model answering now; "" when the primary is
+	// fallbackBy is, by run (session and task), the fallback answering
+	// now and the primary it stands in for; absent while the primary is.
+	fallbackBy map[string]fallbackState
 
 	mu                sync.RWMutex
 	llm               model.LLM
@@ -517,7 +569,7 @@ func (e *Engine) RecordSearch(ctx context.Context, sessionID string, queries int
 // A provider that reports no usage leaves the cost unknown.
 func (e *Engine) RecordSpeech(ctx context.Context, sessionID, model string, usage *genai.GenerateContentResponseUsageMetadata) {
 	e.restoreUsage(sessionID)
-	e.usage.RecordSpeech(sessionID, settingsName(model), usage)
+	e.usage.RecordSpeech(ctx, sessionID, settingsName(model), usage)
 	e.saveUsage(ctx, sessionID)
 }
 
@@ -534,10 +586,7 @@ func (e *Engine) EstimateCostUSD(model string, usage *genai.GenerateContentRespo
 // judge, a workflow's extract step), priced by the configured prices; a
 // call that reported no tokens is unpriced.
 func (e *Engine) EstimateUsage(model string, usage *genai.GenerateContentResponseUsageMetadata) api.Usage {
-	if usage == nil {
-		return api.Usage{Calls: 1}
-	}
-	return e.usage.Estimate(settingsName(model), usage, 0)
+	return e.usage.Estimate(settingsName(model), usage, 0) // no usage: unpriced
 }
 
 // saveUsage keeps sessionID's usage so far in the store.
@@ -692,12 +741,15 @@ func (e *Engine) agentConfig(reg *tools.Registry, spec *agents.AgentSpec, llm mo
 	}
 }
 
-// beforeModel enforces the per-run model-call budget, and puts
-// {secrets:key} values into the request's messages.
+// beforeModel enforces the per-run model-call budget (a sub-agent's own
+// and every calling run's), and puts {secrets:key} values into the
+// request's messages.
 func (e *Engine) beforeModel(ctx agent.Context, req *model.LLMRequest) (*model.LLMResponse, error) {
-	if st := stateFrom(ctx); st != nil && st.maxTurns > 0 {
-		if n := st.turns.Add(1); n > int64(st.maxTurns) {
-			return nil, fmt.Errorf("%w (%d model calls)", api.ErrMaxTurns, st.maxTurns)
+	for st := stateFrom(ctx); st != nil; st = st.parent {
+		if st.maxTurns > 0 {
+			if n := st.turns.Add(1); n > int64(st.maxTurns) {
+				return nil, fmt.Errorf("%w (%d model calls)", api.ErrMaxTurns, st.maxTurns)
+			}
 		}
 	}
 	if req != nil {
@@ -761,31 +813,18 @@ func partsNameSecrets(parts []*genai.Part) bool {
 	return false
 }
 
-// maskSecrets masks the secret values the model echoes in its answer.
-func maskSecrets(resp *model.LLMResponse) {
-	if resp == nil || resp.Content == nil {
-		return
-	}
-	for _, p := range resp.Content.Parts {
-		if p != nil && p.Text != "" {
-			p.Text = redact.Mask(p.Text)
-		}
-	}
-}
-
 // afterModel records token usage for the run's session.
 func (e *Engine) afterModel(ctx agent.Context, resp *model.LLMResponse, respErr error) (*model.LLMResponse, error) {
-	if e.secrets != nil {
-		maskSecrets(resp)
-	}
-	e.guardOutput(ctx, resp) // guardrails on the answer: secrets, personal data, custom checks
+	e.guardOutput(ctx, resp) // secrets it echoes, and guardrails on the answer: secrets, personal data, custom checks
 	if resp == nil || resp.Partial {
 		return nil, nil
 	}
 	e.noteFallback(ctx, resp)
-	if resp.UsageMetadata == nil {
-		return nil, nil
+	if resp.UsageMetadata == nil && resp.Content == nil {
+		return nil, nil // not an answer (nothing to count)
 	}
+	// An answer without usage (a server that doesn't send it) is still a
+	// call, of unknown cost: the session's usage stops claiming a price.
 	id := "default"
 	if st := stateFrom(ctx); st != nil {
 		id = st.sessionID
@@ -810,9 +849,9 @@ func (e *Engine) afterModel(ctx agent.Context, resp *model.LLMResponse, respErr 
 		writes = int64(v)
 	}
 	e.restoreUsage(id)
-	e.usage.RecordWrites(id, served, resp.UsageMetadata, writes)
+	e.usage.RecordCall(ctx, id, served, resp.UsageMetadata, writes)
 	if st := stateFrom(ctx); st != nil && st.taskID != "" {
-		e.usage.RecordWrites(st.taskID, served, resp.UsageMetadata, writes)
+		e.usage.RecordWrites(st.taskID, served, resp.UsageMetadata, writes) // counted once in the metrics
 	}
 	if st := stateFrom(ctx); st != nil {
 		e.saveUsage(ctx, id)
@@ -820,25 +859,43 @@ func (e *Engine) afterModel(ctx agent.Context, resp *model.LLMResponse, respErr 
 	return nil, nil
 }
 
+// fallbackState is a fallback model answering for primary.
+type fallbackState struct{ served, primary string }
+
 // noteFallback tells the user when a fallback model starts answering and
-// when the primary is back, once per change rather than on every call.
+// when the primary is back, once per change in the session (a background
+// task's apart) rather than on every call.
 func (e *Engine) noteFallback(ctx context.Context, resp *model.LLMResponse) {
 	primary, _ := resp.CustomMetadata[FallbackFromKey].(string)
-	served := ""
+	now := fallbackState{primary: primary}
 	if primary != "" {
-		served = resp.ModelVersion
+		now.served = resp.ModelVersion
+	}
+	key := ""
+	if st := stateFrom(ctx); st != nil {
+		key = st.sessionID + "\x00" + st.taskID
 	}
 	e.fallbackMu.Lock()
-	prev := e.fallbackBy
-	e.fallbackBy = served
+	prev := e.fallbackBy[key]
+	if now.served == "" {
+		delete(e.fallbackBy, key)
+	} else {
+		if e.fallbackBy == nil {
+			e.fallbackBy = map[string]fallbackState{}
+		}
+		e.fallbackBy[key] = now
+	}
 	e.fallbackMu.Unlock()
 	notice := e.noticeTo(ctx)
-	if served == prev || notice == nil {
+	if now.served == prev.served || notice == nil {
 		return
 	}
-	msg := i18n.T("model.fallback_recovered", "model", e.ModelName())
-	if served != "" {
-		msg = i18n.T("model.fallback", "primary", primary, "model", served)
+	msg := i18n.T("model.fallback_recovered", "model", prev.primary) // the model that recovered
+	if now.served != "" {
+		msg = i18n.T("model.fallback", "primary", primary, "model", now.served)
+		if reason, _ := resp.CustomMetadata[FallbackReasonKey].(string); reason != "" {
+			msg = i18n.T("model.fallback_error", "primary", primary, "model", now.served, "error", reason)
+		}
 	}
 	slog.InfoContext(ctx, msg)
 	notice(msg)
@@ -911,9 +968,9 @@ func (e *Engine) preToolHooks(ctx agent.Context, t tool.Tool, args map[string]an
 		}); err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		hooks.GrantCall(id)
+		hooks.GrantCall(ctx)
 	case "allow":
-		hooks.GrantCall(id)
+		hooks.GrantCall(ctx)
 	}
 	if out.Context != "" && id != "" {
 		e.hookContext.Store(id, out.Context)
@@ -948,7 +1005,7 @@ func exitCode(result map[string]any) int {
 // the user sent while the turn was running (see Steer).
 func (e *Engine) afterTool(ctx agent.Context, t tool.Tool, args, result map[string]any, toolErr error) (map[string]any, error) {
 	id := tools.CallID(ctx)
-	e.toolReg.Hooks().EndCall(id)
+	e.toolReg.Hooks().EndCall(ctx)
 	e.toolReg.ScriptHooks().PostTool(ctx, e.sessionOf(ctx), t.Name(), args, result, toolErr)
 	entry := audit.Entry{Kind: audit.KindToolResult, Tool: t.Name(), Decision: "ok"}
 	if toolErr != nil {
@@ -1059,6 +1116,13 @@ func (e *Engine) subInstruction(spec *agents.AgentSpec) string {
 	return text
 }
 
+// rootPrompt is spec's prompt as the active agent: at the session's
+// agency level, with its skills listed (newLLMAgent adds the image,
+// diagram and project instructions).
+func (e *Engine) rootPrompt(spec *agents.AgentSpec) string {
+	return spec.InterpolatePrompt(e.agencyLevel()) + e.skillIndex(spec.Name)
+}
+
 // skillIndex lists the skills offered to the named agent, for its
 // instruction; empty with skills off or none offered.
 func (e *Engine) skillIndex(agent string) string {
@@ -1140,7 +1204,7 @@ func (e *Engine) buildTreeLocked(active string, override model.LLM) (tree, error
 		subAgents = append(subAgents, sub)
 	}
 
-	rootInstruction := rootSpec.InterpolatePrompt(e.agencyLevel()) + e.skillIndex(rootSpec.Name)
+	rootInstruction := e.rootPrompt(rootSpec)
 
 	// MCP servers choose their agents; by default only the primary agent.
 	llm := e.modelInTreeLocked(active, active, override)
@@ -1376,7 +1440,7 @@ func drain(events func(yield func(*session.Event, error) bool), handler EventHan
 func (e *Engine) InvokeSubagent(ctx context.Context, agentName, prompt string) (_ string, err error) {
 	depth, _ := ctx.Value(subagentDepthKey{}).(int)
 	if depth >= MaxSubagentDepth {
-		return "", fmt.Errorf("%w (%d)", ErrSubagentDepth, MaxSubagentDepth)
+		return "", fmt.Errorf("%w (%d): an agent this deep can't delegate; do the work itself, or have a shallower agent hand it out", ErrSubagentDepth, MaxSubagentDepth)
 	}
 	spec, ok := e.agentReg.Get(agentName)
 	if !ok {
@@ -1413,6 +1477,7 @@ func (e *Engine) InvokeSubagent(ctx context.Context, agentName, prompt string) (
 	hooks.Async(ctx, "subagent_start", agentName, tools.HookEvent{SessionID: e.sessionOf(ctx), Subagent: agentName, Prompt: prompt})
 	var out strings.Builder
 	defer func() {
+		e.scoped.forget(sessionID) // its session ends here: what it was handed goes with it
 		ev := tools.HookEvent{SessionID: e.sessionOf(ctx), Subagent: agentName, Output: out.String()}
 		if err != nil {
 			ev.Error = err.Error()

@@ -220,7 +220,6 @@ func TestHealthReadsOnlyThisWorkspacesEntries(t *testing.T) {
 	log.Log(skill("ours", w.Dir()))
 	log.Log(skill("anyones", ""))
 	log.Log(skill("theirs", "/elsewhere"))
-	require.NoError(t, log.Close())
 
 	var names []string
 	for _, e := range w.healthInputs(context.Background()).Audit {
@@ -254,7 +253,6 @@ func failCommands(t *testing.T, w *Workspace, session string, commands ...string
 			log.LogContext(ctx, audit.Entry{Kind: audit.KindToolResult, Tool: "run_shell_command", Decision: "exit", Error: "exit code 127", Args: map[string]any{"command": c}})
 		}
 	}
-	require.NoError(t, log.Close())
 }
 
 // declaredTools are the tools a model request offered.
@@ -346,6 +344,9 @@ func TestReflectDue(t *testing.T) {
 			w, _ := openTestWith(t, func(c *config.Config) { c.Harness.ReflectSchedule = tt.schedule })
 			w.saveHarnessState(tt.state)
 			assert.Equal(t, tt.want, w.ReflectDue(now))
+			if tt.name == "not a schedule" {
+				assert.Contains(t, w.harnessState().Skipped, "reflect_schedule can't be read", "why it never runs (N26 engine-top-2#17)")
+			}
 			if tt.name == "first seen: counts from now" {
 				assert.True(t, now.Equal(w.harnessState().LastScheduled), "it starts counting")
 				assert.False(t, w.ReflectDue(now.Add(time.Second)))
@@ -470,7 +471,6 @@ func TestHarnessFailing(t *testing.T) {
 		log.LogContext(ctx, audit.Entry{Kind: audit.KindToolCall, Tool: "activate_skill", Args: map[string]any{"skill_name": "deploy"}})
 		log.LogContext(ctx, audit.Entry{Kind: audit.KindToolResult, Tool: "run_shell_command", Decision: "exit", Error: "exit code 127", Args: map[string]any{"command": "make push"}})
 	}
-	require.NoError(t, log.Close())
 	assert.Equal(t, "skills", w.harnessFailing())
 	assert.Contains(t, w.Suggestions(context.Background()).Tiles, api.Suggestion{Kind: api.SuggestHarnessUpdate, Detail: "skills"})
 

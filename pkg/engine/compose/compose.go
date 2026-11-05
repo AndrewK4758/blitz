@@ -48,6 +48,9 @@ type Turn struct {
 	Text string `json:"text"`
 	// Options are a question's suggested answers.
 	Options []string `json:"options,omitempty"`
+	// Drafted marks the composer's turn that handed on a draft (its
+	// summary): not a question.
+	Drafted bool `json:"drafted,omitempty"`
 }
 
 // Draft is the component as the composer wrote it.
@@ -81,9 +84,9 @@ func (s *Session) Lock() { s.mu.Lock() }
 // Unlock lets s go after a turn.
 func (s *Session) Unlock() { s.mu.Unlock() }
 
-// Snapshot is a copy of s, to hand out.
-func (s *Session) Snapshot() Session {
-	c := Session{ID: s.ID, Kind: s.Kind, Workspace: s.Workspace, Current: s.Current, CostUSD: s.CostUSD, Updated: s.Updated}
+// Snapshot is a copy of s, to hand out (its own, unheld lock).
+func (s *Session) Snapshot() *Session {
+	c := &Session{ID: s.ID, Kind: s.Kind, Workspace: s.Workspace, Current: s.Current, CostUSD: s.CostUSD, Updated: s.Updated}
 	c.Turns = append([]Turn(nil), s.Turns...)
 	if s.Draft != nil {
 		d := *s.Draft
@@ -148,7 +151,7 @@ func Prompt(r Recipe, context string, s *Session, problems []string) string {
 func (s *Session) questions() int {
 	n := 0
 	for _, t := range s.Turns {
-		if t.Role == "composer" {
+		if t.Role == "composer" && !t.Drafted {
 			n++
 		}
 	}
@@ -279,6 +282,14 @@ func Step(ctx context.Context, r Recipe, context string, s *Session, ask Asker) 
 			if last != nil {
 				break // asked instead of fixing: the draft as it was
 			}
+			if s.questions() >= MaxQuestions {
+				// Past the last question: sent back for a draft.
+				if try == fixes {
+					return fmt.Errorf("%w: it asked again after %d questions", ErrNoReply, MaxQuestions)
+				}
+				problems = []string{fmt.Sprintf("you've asked %d questions, the most there may be: draft it now, with what you know", MaxQuestions)}
+				continue
+			}
 			s.Turns = append(s.Turns, Turn{Role: "composer", Text: strings.TrimSpace(rep.Question), Options: rep.Options})
 			s.Updated = time.Now()
 			return nil
@@ -293,7 +304,7 @@ func Step(ctx context.Context, r Recipe, context string, s *Session, ask Asker) 
 		problems = d.Problems
 	}
 	s.Draft = last
-	s.Turns = append(s.Turns, Turn{Role: "composer", Text: last.Summary})
+	s.Turns = append(s.Turns, Turn{Role: "composer", Text: last.Summary, Drafted: true})
 	s.Updated = time.Now()
 	return nil
 }
@@ -357,11 +368,17 @@ func (st *Store) Drop(workspace, id string) {
 	}
 }
 
+// sweepLocked forgets the sessions past Keep. A session in a turn (its
+// lock held) is in use, and Updated is the turn's to write: it's left.
 func (st *Store) sweepLocked() {
 	cut := time.Now().Add(-Keep)
 	for id, s := range st.sessions {
+		if !s.mu.TryLock() {
+			continue
+		}
 		if s.Updated.Before(cut) {
 			delete(st.sessions, id)
 		}
+		s.mu.Unlock()
 	}
 }

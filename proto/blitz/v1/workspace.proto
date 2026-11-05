@@ -1350,8 +1350,9 @@ message RunSkillScriptResponse {
   bool timed_out = 4;
   // The sandbox it ran in.
   string sandbox = 5;
-  // Files it wrote to its output directory.
-  repeated string output_files = 6;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  repeated string output_files = 6 [deprecated = true];
   // Why it didn't run, or failed to.
   string error = 7;
 }
@@ -1655,6 +1656,10 @@ message UndoRequest {
   string workspace = 1;
   // Restore even files changed since the agent's edit.
   bool force = 2;
+  // The chat whose latest turn with changes to undo, counting its
+  // sub-agents' and tasks'; other chats' turns are left alone. Empty: the
+  // workspace's active session.
+  string session_id = 3;
 }
 
 // Response message for WorkspaceService.Undo.
@@ -3128,7 +3133,9 @@ message HumanTask {
   // task's), updateComponents and updateDataModel, its templates filled
   // from the run as the step started.
   string a2ui_json = 9;
-  google.protobuf.Timestamp fire_at = 10;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  google.protobuf.Timestamp fire_at = 10 [deprecated = true];
   google.protobuf.Timestamp created = 11;
   // The chat its run's agent steps are turns in.
   string session_id = 12;
@@ -3161,6 +3168,10 @@ message WatchHumanTasksResponse {
   // How a waiting task reaches the user with no window open ([ui]
   // task_alerts): notify, open or off.
   string alerts = 2;
+  // Always true: tells the service's list (no tasks waiting is a list
+  // too) from the empty messages the desktop's page server adds to a
+  // quiet stream as keepalives (pkg/pageserver), which the page skips.
+  bool listed = 3;
 }
 
 // Request message for WorkspaceService.AnswerHumanTask.
@@ -3242,6 +3253,10 @@ message WorkflowFile {
   // default, dont-ask or bypass; never looser than the workspace's
   // (spec_043_workflows WF-21).
   string mode = 7;
+  // What a job that runs it may do without asking, from its steps
+  // (flows.SchedulePermissions, WF-20): its scheduled runs get these as
+  // the workflow is when they run. Read only.
+  repeated string schedule_permissions = 8;
 }
 
 // Request message for WorkspaceService.ListWorkflows.
@@ -3399,6 +3414,8 @@ message WatchWorkflowRunsResponse {
   // Running and waiting runs, and those that ended in the last few
   // minutes, newest first (summaries).
   repeated WorkflowRun runs = 1;
+  // Always true: the page server's keepalives are empty messages.
+  bool listed = 2;
 }
 
 // Request message for WorkspaceService.StopWorkflowRun.
@@ -3736,7 +3753,9 @@ message ConnectorKind {
   // they name parameters ($1 or @name).
   map<string, string> queries_hint = 11;
   string queries_example = 12;
-  string placeholders = 13;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string placeholders = 13 [deprecated = true];
   // builtin, global or workspace; its file ("" built in).
   string origin = 14;
   string path = 15;

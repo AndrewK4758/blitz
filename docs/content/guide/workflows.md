@@ -43,7 +43,7 @@ Any step can run **once per item** of a list: set *For each* to an expression gi
 
 ## Calling services
 
-An **API call**'s values (URL, query, headers, body) take `{{ templates }}` and secrets as `{secrets:key}`, put in as the call is made and never kept in the workflow or shown. Its auth can be a bearer token, basic auth, an API key (in a header or the query) or **OAuth2 client credentials** (a token URL, a client ID and secret, scopes): the token is fetched and kept until it expires. Its output's data is `{status, headers, body}`, so a condition can read `output.data.body.total`; a status of 400 or more fails the step (catch it with an on error link).
+A **Call an API** step's values (URL, query, headers, body) take `{{ templates }}` and secrets as `{secrets:key}`, put in as the call is made and never kept in the workflow or shown. Only the secrets the step's own settings name are put in: one named in what a template brings (another step's answer, a fetched page) is sent as written. Its auth can be a bearer token, basic auth, an API key (in a header or the query) or **OAuth2 client credentials** (a token URL, a client ID and secret, scopes): the token is fetched and kept until it expires. Its output's data is `{status, headers, body}`, so a condition can read `output.data.body.total`; a status of 400 or more fails the step (catch it with an on error link), and so does a response over 256 KiB, the most a step keeps.
 
 ```yaml
 - id: order
@@ -53,7 +53,7 @@ An **API call**'s values (URL, query, headers, body) take `{{ templates }}` and 
   auth: {type: bearer, token: "{secrets:shop_token}"}
 ```
 
-An **MCP call** names one of the workspace's [MCP servers](mcp.md), a tool and its arguments; it's approved as the agent's MCP calls are. A **remote agent** step sends a message over [A2A](https://a2a-protocol.org) to the agent whose card is at a URL.
+A **Call an MCP tool** step names one of the workspace's [MCP servers](mcp.md), a tool and its arguments; it's approved as the agent's MCP calls are. An **Ask a remote agent** step sends a message over [A2A](https://a2a-protocol.org) to the agent whose card is at a URL.
 
 Calls reach the network as `web_fetch` does: only when the web is on, public addresses only (unless `web.allow_private`), and you're asked before a new host, unless it's in `web.allow_domains` or a permission rule allows it.
 
@@ -67,7 +67,7 @@ A link can carry a **condition**: an expression in [CEL](https://cel.dev) on the
 | Inclusive | every link whose condition holds, else its *otherwise* link |
 | Parallel | every link: the branches run side by side |
 
-Branches that aren't taken are skipped, and so is everything only they lead to; a step that branches lead back to runs once, after every branch that was taken. A step can be **tried again** when it fails (how many times, how long to wait first) and stopped after a **timeout**; an **on error** link catches a failure and goes on, the error as the next step's input.
+Branches that aren't taken are skipped, and so is everything only they lead to; a step that branches lead back to runs once, after every branch that was taken. A step can be **tried again** when it fails (how many times, how long to wait first; a refusal, such as a call you declined or the web being off, isn't tried again) and stopped after a **timeout**; an **on error** link catches a failure and goes on, the error as the next step's input.
 
 Steps pass on text and, when there is some, **data**: JSON an agent answered with, a `.json` file, an Extract step's fields. Later steps read it in their settings as `{{ steps.pull.data.order }}` (any CEL expression in `{{ }}` is filled in as the step starts), and conditions as `steps.pull.data.amount` (`steps["look-up"]` for an ID with a hyphen).
 
@@ -109,7 +109,7 @@ The workspace's mode is the limit. If you restrict a workspace to *Ask*, its wor
 
 ## Running on a schedule
 
-A workflow's settings (select nothing on the canvas) have **Schedule**: **Add a schedule**, say when in words or as cron (*every weekday at 9:00*, *hourly*, `0 6 * * 1`) and, if it needs one, its input. Each schedule is a [job](workers.md) that runs the workflow's steps exactly as they are; switch it off and on, change it or remove it there. What a scheduled run may do without asking (write files, use the web) and its limits are the job's, in **Studio › Jobs**.
+A workflow's settings (select nothing on the canvas) have **Schedule**: **Add a schedule**, say when in words or as cron (*every weekday at 9:00*, *hourly*, `0 6 * * 1`) and, if it needs one, its input. Each schedule is a [job](workers.md) that runs the workflow's steps exactly as they are; switch it off and on, change it or remove it there. A scheduled run may do what the workflow's steps do, as they are when it runs, without asking: write the files its save steps save (a path with `{{…}}` in it: its folder, never the whole workspace, your home folder or anything outside the workspace), reach the hosts its calls call, use its MCP steps' tools and browse for its browser steps; the schedule lists them. Anything else it may do, and its limits, are the job's, in **Studio › Jobs**.
 
 ## The file
 
@@ -136,3 +136,5 @@ edges:
   - {from: gather, to: draft}
   - {from: draft, to: save}
 ```
+
+A key Blitz doesn't know, on the workflow, a step or a link, is the workflow's problem, and it doesn't run until it's fixed: a link's condition written `condition:` instead of `when:` would otherwise be no condition at all.

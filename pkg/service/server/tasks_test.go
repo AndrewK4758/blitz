@@ -118,7 +118,6 @@ edges: [{from: ask, to: save}]
 	require.NoError(t, err)
 	require.Len(t, list.Msg.Tasks, 1)
 	assert.Equal(t, "timer", list.Msg.Tasks[0].Kind)
-	assert.NotNil(t, list.Msg.Tasks[0].FireAt)
 	assert.Equal(t, "NOT_ANSWERABLE", reason(t, unary(c.workspaces.AnswerHumanTask, &pb.AnswerHumanTaskRequest{Workspace: dir, TaskId: list.Msg.Tasks[0].Id})))
 	s.resumeDueTimers(ctx)
 	assert.NoFileExists(t, filepath.Join(dir, "out", "later.md"), "not due yet")
@@ -145,10 +144,12 @@ func TestWatchHumanTasks(t *testing.T) {
 	require.True(t, stream.Receive(), "%v", stream.Err())
 	assert.Empty(t, stream.Msg().Tasks)
 	assert.Equal(t, "notify", stream.Msg().Alerts)
+	assert.True(t, stream.Msg().Listed, "no tasks is a list too, told from a keepalive")
 
 	_, err = c.sessions.StartBackground(ctx, connect.NewRequest(&pb.StartBackgroundRequest{Workspace: dir, Turn: &pb.Turn{Text: "/ask", Command: true}}))
 	require.NoError(t, err)
 	require.True(t, stream.Receive(), "%v", stream.Err())
 	require.Len(t, stream.Msg().Tasks, 1)
 	assert.Equal(t, "ask", stream.Msg().Tasks[0].Workflow)
+	assert.True(t, stream.Msg().Listed)
 }

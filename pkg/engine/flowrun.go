@@ -32,6 +32,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/engine/session"
 	"github.com/retail-cortex/blitz/pkg/engine/skills"
 	"github.com/retail-cortex/blitz/pkg/engine/tools"
+	"github.com/retail-cortex/blitz/pkg/engine/workers"
 	"github.com/retail-cortex/blitz/pkg/i18n"
 	"github.com/retail-cortex/blitz/pkg/textutil"
 )
@@ -55,7 +56,13 @@ func (w *Workspace) ProjectWorkflowsDir() string {
 // a loop of workflows calling each other, or calling one that isn't there,
 // has that as its problem.
 func (w *Workspace) Workflows() []flows.Flow {
-	all := flows.Load(w.ProjectWorkflowsDir())
+	return withCallProblems(flows.Load(w.ProjectWorkflowsDir()))
+}
+
+// withCallProblems is all with each workflow's calls checked against the
+// others: a loop of workflows calling each other, or a call to one that
+// isn't there, is its problem.
+func withCallProblems(all []flows.Flow) []flows.Flow {
 	loops := flows.CallLoops(all)
 	for i, f := range all {
 		var probs []string
@@ -73,6 +80,25 @@ func (w *Workspace) Workflows() []flows.Flow {
 		all[i].Problem = strings.Join(probs, "; ")
 	}
 	return all
+}
+
+// jobWorkflow is the workflow the job wk runs, read from the bytes its
+// hash covers (wk.FlowFile), not from the file again: what the enabled
+// hash pinned is what runs and what its steps may do (spec_023_workers
+// WK-05b). The other workflows are read as they are, for its calls.
+func (w *Workspace) jobWorkflow(wk *workers.Worker) (flows.Flow, bool) {
+	if wk.Flow == "" || wk.FlowFile == nil {
+		return flows.Flow{}, false
+	}
+	f := flows.Parse(wk.Flow, wk.FlowFile.Path, wk.FlowFile.Data)
+	all := flows.Load(w.ProjectWorkflowsDir())
+	if i := slices.IndexFunc(all, func(o flows.Flow) bool { return o.Name == f.Name }); i >= 0 {
+		all[i] = f
+	} else {
+		all = append(all, f)
+	}
+	all = withCallProblems(all)
+	return all[slices.IndexFunc(all, func(o flows.Flow) bool { return o.Name == f.Name })], true
 }
 
 // workflow is the workspace's workflow name.
@@ -172,7 +198,15 @@ var stepPrompts = map[string]string{
 // didn't: a failing block rule stops the workflow, revise asks once for a
 // better answer, warn says so.
 func (w *Workspace) agentStep(ctx context.Context, sessionID string, f flows.Flow, n flows.Node, in string, on func(api.Event)) (string, error) {
+	// A job's workflow: its steps are the job's run, on its agent and
+	// model (WK-43); a step's own agent comes after, so it wins.
+	job := jobRunFrom(ctx)
 	var opts []runtime.ExecOption
+	var run string
+	agent := n.Agent // "": the active agent's
+	if job != nil {
+		opts, run, agent = slices.Clone(job.opts), job.id, cmp.Or(n.Agent, job.agent)
+	}
 	if n.Agent != "" {
 		if _, ok := w.agents.Get(n.Agent); !ok {
 			return "", fmt.Errorf("agent %q isn't defined", n.Agent)
@@ -194,14 +228,14 @@ func (w *Workspace) agentStep(ctx context.Context, sessionID string, f flows.Flo
 	b.WriteString(skillNote(list))
 	label := fmt.Sprintf("/%s › %s", f.Name, cmp.Or(n.Title, n.ID))
 	st := flowStorage(ctx, w)
-	res, err := w.run(ctx, sessionID, turn{Turn: api.Turn{Text: label, Prompt: b.String()}}, on, st, opts...)
-	w.meterTurn(ctx, n.Agent, res)
+	res, err := w.run(ctx, sessionID, turn{Turn: api.Turn{Text: label, Prompt: b.String()}, run: run, agent: agent}, on, st, opts...)
+	w.meterTurn(ctx, agent, res)
 	if err != nil {
 		return "", err
 	}
 	out := res.Output
 	judged := map[string]bool{}
-	for _, g := range gates.Gates(w.Rules(), gates.AfterAgent, cmp.Or(n.Agent, w.engine.ActiveAgent())) {
+	for _, g := range gates.Gates(w.Rules(), gates.AfterAgent, cmp.Or(agent, w.engine.ActiveAgent())) {
 		judged[g.Name] = true
 	}
 	for _, name := range n.Rules {
@@ -221,8 +255,8 @@ func (w *Workspace) agentStep(ctx context.Context, sessionID string, f flows.Flo
 		case r.Action == gates.Block:
 			return "", errors.New(i18n.T("flow.rule_blocked", "rule", r.Name, "reason", v.Reason))
 		case r.Action == gates.Revise:
-			again, err := w.run(ctx, sessionID, turn{Turn: api.Turn{Text: label, Prompt: i18n.T("flow.rule_revise", "rule", r.Name, "reason", v.Reason)}}, on, st, opts...)
-			w.meterTurn(ctx, n.Agent, again)
+			again, err := w.run(ctx, sessionID, turn{Turn: api.Turn{Text: label, Prompt: i18n.T("flow.rule_revise", "rule", r.Name, "reason", v.Reason)}, run: run, agent: agent}, on, st, opts...)
+			w.meterTurn(ctx, agent, again)
 			if err != nil {
 				return "", err
 			}

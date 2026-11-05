@@ -59,14 +59,14 @@ bazel run //tools:license_headers   # add the Apache header to new files
 tools/third_party_notices.sh    # regenerate THIRD_PARTY_NOTICES after changing dependencies
 bazel run //tools/specs         # the specs' index and the paths they name
 bazel run //:docs               # this site at http://localhost:1313
-tools/coverage.sh               # test coverage of apps/ and pkg/; fails below tools/coverage/floor.txt
+tools/coverage.sh               # test coverage of apps/ and pkg/ (libraries no test links listed, not counted); fails below tools/coverage/floor.txt
 bazel test //apps/desktop/web:coverage   # the desktop page's line and branch coverage; fails below vite.config.ts's thresholds
 bazel run //tools/codeowners    # .github/CODEOWNERS from OWNERS.txt
 bazel run //:desktop            # the desktop app (Electron, spec_038_electron) on this machine's service
 bazel run //:desktop-web        # the desktop page in a browser (?fake: no service needed)
 bazel build //:mac-app          # the desktop app for this Mac; //:deb, //:pacman, //:desktop-tar on Linux; //:windows-zip anywhere
 bazel build //:archives         # the CLI release archives, every platform
-BLITZ_TELEMETRY=1 BLITZ_LOG_LEVEL=debug bazel run //apps/cli:blitz   # traces to http://localhost:4318; logs in ~/.blitz/logs
+BLITZ_TELEMETRY=1 BLITZ_LOG_LEVEL=debug bazel run //apps/cli:blitz -- --local   # a service of its own, which exports traces to http://localhost:4318; logs in ~/.blitz/logs
 bazel test //pkg/engine/tools:tools_test --test_env=BLITZ_PYENV_TESTS=1 --test_filter='PyEnv|InstallsPackages'   # real Python environments (network)
 ```
 
@@ -87,6 +87,7 @@ This site is in `docs/`: Markdown pages in `docs/content/`, built by Hugo with t
 - A bug fix comes with a test that was confirmed to fail without the fix (temporarily revert, run, restore).
 - The journeys people take (/setup, a handoff to the coder, picking up a session, a question from a sub-agent) each have a scripted test of what the window receives, not only of the tool that does the work: `pkg/engine/subagents_test.go`, `pkg/engine/runtime/setupspec_test.go`, `TestAnthropicHandoffToCoder`. A change to how events reach the conversation keeps them passing.
 - A fake provider is as strict as the real one: it goes through the SDK's own checks (no option that skips them, such as the Anthropic SDK's `WithRequestTimeout`) and answers the way the API does (a stream when the request asks for one). 0.8.9's coder handoff passed CI against a fake that skipped the SDK's check.
+- The page's `?fake` service (`apps/desktop/web/src/dev/fake.ts`) is as strict as the real one: what the service refuses, it refuses with the service's words (`dev/fakeChecks.ts` ports the checks: settings set with `SetConfigValue` and their types, model and session settings, rules and guardrails, agents, jobs, MCP servers, providers and the api provider, browser profiles, secrets, a human task's answer, the permission lists by effect), what the service keeps it gives back, and its server streams carry the page server's empty keepalive messages. A check it can't port exactly (a schedule) says so; `fake.test.ts` and `fakeChecks.test.ts` hold it to this.
 - Go tests use Testify: `require` for what the rest of the test depends on (setup, a value it goes on to use), `assert` for the checks; one assertion per fact, not `a || b`; the specific assertion (`ErrorIs`, `Contains`, `Len`, `FileExists`), not `True(x == y)`; messages add what the values don't say (which case, what it means) and never restate got and want. Table-driven loops run each case as a subtest, `t.Run(name, …)`. `t.Fatal` and `t.Error` stay for control flow: a `select`'s timeout, an unexpected event, a helper that found nothing.
 - Each feature updates this site's pages for it (the [product](../products/_index.md) and [guide](../guide/_index.md) pages, its [spec](../about/specs/_index.md)), a [roadmap](../about/roadmap.md) item, and a [manual verification](manual-verification.md) section.
 - Real-terminal behavior was checked with `script` against a local fake provider. Answer the line editor's cursor-position query (`ESC[6n`) with `ESC[1;1R` in the scripted input, or it waits forever.

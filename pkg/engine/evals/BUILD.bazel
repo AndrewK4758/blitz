@@ -31,7 +31,7 @@ go_library(
         "//pkg/api",
         "//pkg/engine/frontmatter",
         "//pkg/engine/gates",
-        "@in_gopkg_yaml_v3//:yaml_v3",
+        "//pkg/engine/jsonl",
     ],
 )
 

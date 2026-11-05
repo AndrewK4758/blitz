@@ -90,7 +90,10 @@ func (r *bgRun) add(ev *pb.TurnEvent) {
 	}
 	r.events = append(r.events, ev)
 	if over := len(r.events) - keptRunEvents; over > 0 {
-		r.events = slices.Delete(r.events, 0, over)
+		// Resliced, not shifted (as liveRun.add): the dropped are cleared,
+		// and append copies the kept when it outgrows the array.
+		clear(r.events[:over])
+		r.events = r.events[over:]
 		r.dropped += over
 	}
 	for ch := range r.notify {
@@ -302,10 +305,12 @@ func (h sessionService) StartBackground(ctx context.Context, r req[pb.StartBackg
 	if t == nil || strings.TrimSpace(t.Text) == "" {
 		return nil, apiError(connect.CodeInvalidArgument, "INVALID_TURN", errors.New("a background run needs a prompt"))
 	}
-	run, err := h.s.startRun(w, api.Turn{
-		Text: t.Text, Prompt: t.Prompt, Plan: t.Plan, ReadOnly: t.ReadOnly, MaxTurns: int(t.MaxTurns),
-		MaxCostUSD: t.MaxCostUsd, Timeout: t.GetTimeout().AsDuration(), Command: t.Command,
-	})
+	// Every field a turn takes, as RunTurn's (spec_027 PAR-PAR-20).
+	turn, err := h.s.turn(w, r.Msg.Workspace, t)
+	if err != nil {
+		return nil, err
+	}
+	run, err := h.s.startRun(w, turn)
 	if err != nil {
 		return nil, err
 	}

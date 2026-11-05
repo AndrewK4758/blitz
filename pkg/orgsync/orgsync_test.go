@@ -98,6 +98,38 @@ func read(dir, name string) string {
 	return string(b)
 }
 
+// A workspace whose shared repository has no main yet (its sync started
+// before the share's own push landed) sends what it has and says so,
+// rather than waiting, stateless, for the next fetch; with nothing on
+// either side it's in step.
+func TestNothingSharedYet(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		commit bool
+	}{
+		{"commits here go out", true},
+		{"nothing either side", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			bare, dir := filepath.Join(root, "plans.git"), filepath.Join(root, "ana")
+			run(t, root, "init", "-q", "--bare", "-b", "main", bare)
+			run(t, root, "init", "-q", "-b", "main", dir)
+			run(t, dir, "remote", "add", "origin", bare)
+			if tc.commit {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "plan.md"), []byte("# Plan\n"), 0o644))
+				run(t, dir, "add", "-A")
+				run(t, dir, "commit", "-q", "-m", "First")
+			}
+			s := start(t, "Ana", dir, nil, nil)
+			eventually(t, func() bool { return s.State().State == Saved }, "in step")
+			if tc.commit {
+				assert.Equal(t, "First", strings.TrimSpace(run(t, bare, "log", "-1", "--format=%s", "main")), "shared")
+			}
+		})
+	}
+}
+
 // A change is saved a moment after the last one, never mid-turn, and
 // reaches the others when they hear of it (EN-62).
 func TestSync(t *testing.T) {
@@ -127,6 +159,26 @@ func TestSync(t *testing.T) {
 
 	boSync.Remote()
 	eventually(t, func() bool { return strings.Contains(read(bo, "plan.md"), "Ship it.") && read(bo, "a.md") == "a" }, "Bo has Ana's changes")
+}
+
+// A save with what looks like a secret in it is held back on this
+// computer, saying where, until it's taken out (N26
+// safety-enterprise#14).
+func TestSecretsHeldBack(t *testing.T) {
+	bare, ana, _ := shared(t)
+	anaSync := start(t, "Ana", ana, nil, nil)
+	eventually(t, func() bool { return anaSync.State().State == Saved }, "started")
+	key := "AKIA" + "Q3EXAMPLEZ7Y4WXN"
+	require.NoError(t, os.WriteFile(filepath.Join(ana, ".env"), []byte("AWS_KEY="+key+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(ana, "notes.md"), []byte("notes"), 0o644))
+	eventually(t, func() bool { return anaSync.State().State == Secrets }, "held back")
+	assert.Contains(t, anaSync.State().Err, ".env:1 (AWS access key AKIA")
+	assert.NotContains(t, anaSync.State().Err, key)
+	assert.Equal(t, "First", strings.TrimSpace(run(t, bare, "log", "-1", "--format=%s", "main")), "nothing sent")
+
+	require.NoError(t, os.WriteFile(filepath.Join(ana, ".env"), []byte("AWS_KEY=\n"), 0o600))
+	eventually(t, func() bool { return anaSync.State().State == Saved }, "sent once it's out")
+	assert.Equal(t, "Ana: 2 files", strings.TrimSpace(run(t, bare, "log", "-1", "--format=%s", "main")))
 }
 
 // A file both changed keeps both versions: the shared one under its name,
@@ -356,4 +408,18 @@ func TestSaveNow(t *testing.T) {
 	stop()
 	_, err = s.SaveNow(gone)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+// Failed is the states in which the service hasn't got this computer's
+// saves, which GetOrgSync reports for the clients.
+func TestFailedSays(t *testing.T) {
+	for _, tt := range []struct {
+		state string
+		want  bool
+	}{
+		{Saved, false}, {Saving, false}, {Conflicts, false}, {"", false},
+		{Offline, true}, {SignedOut, true}, {Refused, true}, {Secrets, true},
+	} {
+		t.Run(tt.state, func(t *testing.T) { assert.Equal(t, tt.want, Failed(tt.state)) })
+	}
 }

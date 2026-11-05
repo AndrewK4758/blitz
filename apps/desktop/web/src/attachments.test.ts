@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { acceptAttribute, acceptedAs, attachableFiles, clock, describeImage, isDocument, maxUploadBytes, readyIds, rejectReason, uploading, webBlocks, type Accepted, type Attachment } from "./attachments";
+import { acceptAttribute, acceptedAs, clock, describeImage, failedUpload, isDocument, maxUploadBytes, readyIds, rejectReason, uploading, webBlocks, type Accepted, type Attachment } from "./attachments";
 
 // What the service reports for a Claude model, and for Gemini.
 const claude: Accepted[] = [
@@ -36,15 +36,13 @@ describe("attachments", () => {
   it("says why a file can't be attached", () => {
     expect(rejectReason({ type: "image/png", size: 10, name: "a.png" }, claude, "claude-sonnet-5")).toBe("");
     expect(rejectReason({ type: "video/mp4", size: 10, name: "clip.mp4" }, claude, "claude-sonnet-5")).toBe("claude-sonnet-5 can't take clip.mp4");
+    expect(rejectReason({ type: "video/mp4", size: 10, name: "clip.mp4" }, claude, ""), "no model named").toBe("this model can't take clip.mp4");
     expect(rejectReason({ type: "image/png", size: (20 << 20) + 1, name: "big.png" }, claude, "m")).toMatch("larger than 20 MB");
     expect(rejectReason({ type: "video/mp4", size: maxUploadBytes + 1, name: "talk.mp4" }, gemini, "m")).toMatch("put it in the workspace");
     expect(rejectReason({ type: "text/plain", size: (1 << 20) + 1, name: "log.txt" }, claude, "m")).toMatch("larger than 1 MB");
   });
-  it("builds the picker's accept list and filters files", () => {
+  it("builds the picker's accept list", () => {
     expect(acceptAttribute(claude)).toBe(".png,.jpg,.jpeg,image/png,image/jpeg,.pdf,application/pdf,.txt,.md,.csv,text/plain");
-    const f = (name: string, type: string) => new File(["x"], name, { type });
-    expect(attachableFiles([f("a.png", "image/png"), f("b.mp4", "video/mp4"), f("c.md", "")], claude).map((x) => x.name)).toEqual(["a.png", "c.md"]);
-    expect(attachableFiles(null, claude)).toEqual([]);
     expect(isDocument({ type: "", name: "dropped.PDF" })).toBe(true);
   });
   it("sends only uploaded files and waits for the rest", () => {
@@ -56,6 +54,11 @@ describe("attachments", () => {
     expect(readyIds(list)).toEqual(["x"]);
     expect(uploading(list)).toBe(true);
     expect(uploading([list[0], list[2]])).toBe(false);
+  });
+  // N26 desktop-1#5: a failed upload was dropped from the prompt unsaid.
+  it("holds the prompt while an upload failed", () => {
+    expect(failedUpload([{ key: "1", name: "a", url: "u1", id: "x" }])).toBe(false);
+    expect(failedUpload([{ key: "1", name: "a", url: "u1", id: "x" }, { key: "3", name: "c", url: "u3", error: "too big" }])).toBe(true);
   });
   it("sends web content as it is, uploading nothing", () => {
     const page = { kind: "web_page" as const, url: "http://localhost:3000/", title: "Home", html: "<p>hi</p>", text: "" };

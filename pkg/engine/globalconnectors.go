@@ -56,12 +56,6 @@ func (g GlobalConnectors) List() []connectors.Connection {
 	return list
 }
 
-// HasSecret says whether a global connection's secret field has a value.
-func (g GlobalConnectors) HasSecret(c connectors.Connection, field string) bool {
-	cat, ok := g.Catalog().Category(c.Category)
-	return ok && connectors.HasSecret(g.Dirs(), cat, global(c), field)
-}
-
 // Save writes a global connection, in place of previous ("" for a new
 // one), keeping the secret values given as global secrets; problems,
 // with nothing written, when it can't be saved. A rename keeps whether
@@ -94,7 +88,7 @@ func (g GlobalConnectors) Delete(_ context.Context, r connectors.Ref) error {
 // env is where a global connection is tested: the secret values typed,
 // else the global ones.
 func (g GlobalConnectors) env(values map[string]string) connectors.Env {
-	return connectors.Env{Dirs: g.Dirs(), Values: values}
+	return connectors.Env{Dirs: g.Dirs(), Values: values, Trusted: true}
 }
 
 // global is c as a global connection.

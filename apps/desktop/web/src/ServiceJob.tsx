@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import {
   mdiAccountClockOutline,
@@ -38,6 +38,7 @@ import {
 import { config } from "./api";
 import { message, reason } from "./errors";
 import { useServiceRuns } from "./serviceRuns";
+import { formatBytes } from "./bytes";
 import { language, t } from "./i18n";
 import type { GetServiceJobResponse, ServiceJob, ServiceRun, ServiceRunFile } from "./gen/blitz/v1/config_pb";
 import type { Worker } from "./gen/blitz/v1/worker_pb";
@@ -53,13 +54,15 @@ const statusIcon: Record<string, string> = {
   stopped: mdiStopCircleOutline,
 };
 
-/** A size in bytes, for people. */
-export function size(n: bigint | number): string {
-  const b = Number(n);
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / 1024 / 1024).toFixed(1)} MB`;
-}
+/** Sync states waiting won't clear: the person acts (signs in, resolves, fixes the file), then Check again. */
+const stuckSync = ["offline", "signed_out", "conflicts", "refused", "secrets"];
+
+/** How often, and how many times, Studio looks again while sync puts a job on main (5 minutes). */
+const syncPollMs = 5000;
+const syncPolls = 60;
+
+/** Whether to look again by itself: sync is putting the job on main, in a state that moves, and it hasn't looked syncPolls times. */
+export const waitsForSync = (r: Pick<GetServiceJobResponse, "reason" | "syncState"> | null, polls: number) => r?.reason === "saving" && !stuckSync.includes(r.syncState) && polls < syncPolls;
 
 /** whyNot is what Studio says of a job the service hasn't got, by its reason (GetServiceJob's). */
 export function whyNot(r: Pick<GetServiceJobResponse, "reason" | "detail" | "syncState">): string {
@@ -69,7 +72,7 @@ export function whyNot(r: Pick<GetServiceJobResponse, "reason" | "detail" | "syn
     case "not_pushed":
       return t("desktop.service_job.not_pushed");
     case "saving":
-      if (r.syncState === "refused") return t("desktop.service_job.saving.refused", { why: r.detail });
+      if (r.syncState === "refused" || r.syncState === "secrets") return t(`desktop.service_job.saving.${r.syncState}`, { why: r.detail });
       return ["offline", "signed_out", "conflicts"].includes(r.syncState) ? t(`desktop.service_job.saving.${r.syncState}`) : t("desktop.service_job.saving");
     case "not_service":
       return t("desktop.service_job.not_service", { why: r.detail });
@@ -105,10 +108,12 @@ export function ServiceJobView({ dir, worker, onEdit, onDelete }: { dir: string;
       setError(message(e));
     }
   }, [dir, worker.name, worker.path]);
-  // While sync puts it on main, look again until the service has it.
+  // While sync puts it on main, look again until the service has it, for
+  // a while; a state waiting won't clear stops it (Check again is there).
+  const polls = useRef(0);
   useEffect(() => {
-    if (missing?.reason !== "saving") return;
-    const id = window.setTimeout(() => void refresh(), 5000);
+    if (!waitsForSync(missing, polls.current)) return;
+    const id = window.setTimeout(() => ((polls.current += 1), void refresh()), syncPollMs);
     return () => window.clearTimeout(id);
   }, [missing, refresh]);
   const push = async () => {
@@ -319,7 +324,7 @@ function ServiceRunRow({
         {files?.map((f) => (
           <span key={f.urn} className="row t-body-sm" style={{ gap: 4 }}>
             <code className="ellipsis spacer">{f.path}</code>
-            <span className="muted">{size(f.size)}</span>
+            <span className="muted">{formatBytes(f.size)}</span>
             <IconButton icon={mdiDownload} label={t("desktop.service_job.save", { name: f.path })} small onClick={() => void save(f)} />
           </span>
         ))}

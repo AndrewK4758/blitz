@@ -20,6 +20,7 @@ go_library(
         "agentmodels.go",
         "apiprovider.go",
         "atomic.go",
+        "background.go",
         "browserprofiles.go",
         "check.go",
         "config.go",
@@ -37,6 +38,7 @@ go_library(
         "project.go",
         "providers.go",
         "reference.go",
+        "secretfields.go",
         "trust.go",
     ],
     embedsrcs = [
@@ -48,6 +50,7 @@ go_library(
     importpath = "github.com/retail-cortex/blitz/pkg/config",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/jobspec",
         "//pkg/secrets",
         "@com_github_anthropics_anthropic_sdk_go//config",
         "@com_github_burntsushi_toml//:toml",
@@ -80,6 +83,7 @@ go_test(
         "project_test.go",
         "providers_test.go",
         "reference_test.go",
+        "secretfields_test.go",
     ],
     embed = [":config"],
     deps = [

@@ -19,8 +19,10 @@ import (
 	"context"
 	"encoding/json"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,7 +56,6 @@ func TestAuditLogWritesRedactedEntries(t *testing.T) {
 
 	l.LogContext(WithSession(context.Background(), "sess-1"), Entry{Kind: KindToolCall, Tool: "run_shell_command", Args: map[string]any{"command": "curl -H 'Authorization: super-secret-value'"}})
 	l.Log(Entry{Kind: KindDenial, Tool: "delete_file", Detail: "token=abcdefghij", Decision: "deny"})
-	l.Close()
 
 	path := filepath.Join(dir, "audit-2026-09-23.jsonl")
 	info, err := os.Stat(path)
@@ -80,7 +81,6 @@ func TestAuditRotatesDaily(t *testing.T) {
 	l.Log(Entry{Kind: KindPrompt})
 	day = day.Add(2 * time.Minute)
 	l.Log(Entry{Kind: KindPrompt})
-	l.Close()
 	for _, name := range []string{"audit-2026-01-01.jsonl", "audit-2026-01-02.jsonl"} {
 		t.Run(name, func(t *testing.T) {
 			_, err := os.Stat(filepath.Join(dir, name))
@@ -93,7 +93,6 @@ func TestNilLoggerIsNoOp(t *testing.T) {
 	var l *Logger
 	l.SetWorkspace("b")
 	l.Log(Entry{Kind: KindPrompt})
-	assert.NoError(t, l.Close())
 	// Negative: an unwritable location fails at Open.
 	file := filepath.Join(t.TempDir(), "file")
 	os.WriteFile(file, nil, 0o600)
@@ -115,18 +114,55 @@ func TestLogSkipsBadEntries(t *testing.T) {
 
 	require.NoError(t, os.RemoveAll(dir))
 	l.Log(Entry{Kind: KindPrompt})
-	assert.Nil(t, l.f, "a failed rotation leaves no open file")
-	assert.NoError(t, l.Close(), "closing without an open file")
 }
 
-// TestCloseClosesTheFile checks that Close releases the open day file.
-func TestCloseClosesTheFile(t *testing.T) {
-	l, err := Open(t.TempDir(), nil)
+// TestLogReportsOnce checks that the first failure of any kind is
+// reported, and later ones aren't (N26 engine-sub-1 #9).
+func TestLogReportsOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(l *Logger, dir string)
+		entry Entry
+	}{
+		{"an entry that isn't JSON", func(*Logger, string) {}, Entry{Kind: KindToolCall, Args: map[string]any{"x": math.NaN()}}},
+		{"a folder that's gone", func(_ *Logger, dir string) { require.NoError(t, os.RemoveAll(dir)) }, Entry{Kind: KindPrompt}},
+		{"a file that can't be written", func(l *Logger, dir string) {
+			require.NoError(t, os.Mkdir(filepath.Join(dir, "audit-"+l.now().UTC().Format(time.DateOnly)+".jsonl"), 0o700))
+		}, Entry{Kind: KindPrompt}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			old := stderr
+			stderr = &out
+			t.Cleanup(func() { stderr = old })
+			dir := t.TempDir()
+			l, err := Open(dir, nil)
+			require.NoError(t, err)
+			tc.setup(l, dir)
+			l.Log(tc.entry)
+			l.Log(tc.entry)
+			assert.Equal(t, 1, strings.Count(out.String(), "audit: "), out.String())
+			assert.Contains(t, out.String(), "entry wasn't written")
+		})
+	}
+}
+
+// TestLogAfterATornLine checks that an entry after a torn last line (a
+// process that died mid-write) starts a line of its own, so it reads back
+// (N26 followups#2).
+func TestLogAfterATornLine(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(dir, nil)
 	require.NoError(t, err)
-	l.Log(Entry{Kind: KindPrompt})
-	require.NotNil(t, l.f)
-	assert.NoError(t, l.Close())
-	assert.Nil(t, l.f)
+	now := time.Now().UTC()
+	l.now = func() time.Time { return now }
+	name := filepath.Join(dir, "audit-"+now.Format(time.DateOnly)+".jsonl")
+	require.NoError(t, os.WriteFile(name, []byte(`{"time":"`+now.Format(time.RFC3339Nano)+`","kind":"prompt","detail":"one"}`+"\n"+`{"kind":"pro`), 0o600))
+	l.Log(Entry{Kind: KindPrompt, Detail: "two"})
+	got := Read(dir, "", now.Add(-time.Hour))
+	require.Len(t, got, 2, "the torn line is skipped, the new entry kept")
+	assert.Equal(t, "one", got[0].Detail)
+	assert.Equal(t, "two", got[1].Detail)
 }
 
 func TestRead(t *testing.T) {
@@ -141,7 +177,6 @@ func TestRead(t *testing.T) {
 	l.Log(Entry{Kind: KindPrompt, Detail: "elsewhere", Workspace: "/other"})
 	at = now.Add(-time.Minute)
 	l.Log(Entry{Kind: KindPrompt, Detail: "any workspace"})
-	l.Close()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "audit-"+now.Format(time.DateOnly)+".jsonl"), append(mustRead(t, filepath.Join(dir, "audit-"+now.Format(time.DateOnly)+".jsonl")), []byte("not json\n")...), 0o600))
 
 	var got []string
@@ -150,6 +185,21 @@ func TestRead(t *testing.T) {
 	}
 	assert.Equal(t, []string{"yesterday", "any workspace"}, got, "since then, this workspace's and no workspace's, in order; a bad line skipped")
 	assert.Empty(t, Read("", "/w", now.Add(-time.Hour)), "no log")
+
+	// A line past the longest read is skipped, and the day's later
+	// entries are still read (N26 engine-sub-1 #8).
+	old := maxLine
+	maxLine = 200
+	t.Cleanup(func() { maxLine = old })
+	day := filepath.Join(dir, "audit-"+now.Format(time.DateOnly)+".jsonl")
+	big, _ := json.Marshal(Entry{Time: now, Kind: KindToolCall, Detail: strings.Repeat("x", 300), Workspace: "/w"})
+	after, _ := json.Marshal(Entry{Time: now, Kind: KindPrompt, Detail: "after the long one", Workspace: "/w"})
+	require.NoError(t, os.WriteFile(day, append(append(append(mustRead(t, day), big...), '\n'), append(after, '\n')...), 0o600))
+	got = nil
+	for _, e := range Read(dir, "/w", now.Add(-40*time.Hour)) {
+		got = append(got, e.Detail)
+	}
+	assert.Equal(t, []string{"yesterday", "any workspace", "after the long one"}, got)
 	assert.Empty(t, Read(filepath.Join(dir, "missing"), "/w", now.Add(-time.Hour)))
 }
 
@@ -163,7 +213,6 @@ func TestStamp(t *testing.T) {
 	first := Stamp(dir, since)
 	assert.NotEqual(t, empty, first, "an entry changes it")
 	l.Log(Entry{Kind: KindPrompt, Detail: "two"})
-	require.NoError(t, l.Close())
 	assert.NotEqual(t, first, Stamp(dir, since))
 	assert.NotEqual(t, Stamp(dir, since), Stamp(dir, since.Add(-time.Minute)), "so does where it starts")
 }
@@ -202,7 +251,6 @@ func TestLogContextNamesTheAgent(t *testing.T) {
 			l, err := Open(dir, nil)
 			require.NoError(t, err)
 			l.LogContext(tt.ctx, tt.e)
-			require.NoError(t, l.Close())
 			got := Read(dir, "", time.Now().Add(-time.Hour))
 			require.Len(t, got, 1)
 			assert.Equal(t, tt.want, got[0].Agent)

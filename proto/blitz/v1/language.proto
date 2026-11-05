@@ -204,9 +204,10 @@ message CompletionItem {
   bool snippet = 7;
   // Other changes that come with it (an import).
   repeated TextEdit additional_edits = 8;
-  // The server's order and the text it filters by.
-  string sort_text = 9;
-  string filter_text = 10;
+  // Removed 2026-11-05 (scan N26-service#10: no client read it).
+  // Deprecated: no longer set (kept for older clients).
+  string sort_text = 9 [deprecated = true];
+  string filter_text = 10 [deprecated = true];
 }
 
 // Response message for LanguageService.Complete.

@@ -125,7 +125,7 @@ func TestExportPDF(t *testing.T) {
 func TestExportPDFApprovalAndUndo(t *testing.T) {
 	ws, dir := newTestWorkspace(t)
 	writeFile(t, filepath.Join(dir, "notes.md"), "# Notes\n\nText.")
-	cp := NewCheckpoints(ws, 0)
+	cp := newTestCheckpoints(ws, 0)
 
 	// Denied: nothing is written.
 	h, reqs := approverHooks(false)
@@ -146,7 +146,7 @@ func TestExportPDFApprovalAndUndo(t *testing.T) {
 	out = runTool(t, toolOf(t)(NewExportPDFTool(ws, h, "")), map[string]any{"path": "notes.md"})
 	require.Empty(t, errOf(out))
 	assert.FileExists(t, filepath.Join(dir, "notes.pdf"))
-	_, err := cp.Undo(false)
+	_, err := cp.Undo("", false)
 	require.NoError(t, err)
 	assert.NoFileExists(t, filepath.Join(dir, "notes.pdf"))
 }

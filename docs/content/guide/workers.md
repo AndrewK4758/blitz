@@ -19,18 +19,21 @@ The desktop app and `blitz service install` keep it running. A service the CLI s
 
 ## Your first job
 
-**Desktop:** **Studio › Jobs**, then **New job** (the calendar icon), and fill in:
+**Desktop:** **Studio › Jobs**, then **New job** (the calendar icon). **Compose with AI**, at the top, drafts the job from a description after a few questions (when, in which time zone, where the results go, what it may reach) and fills the form for you to review. Or fill it in yourself:
 
 | Field | What to put |
 |---|---|
-| Description | What it does; the name follows from it |
-| Schedule | `Weekdays at 9:30`, `daily at 6 AM`, `every 2 hours`, or cron |
+| What it does | A line for the lists; the **Name** (its folder) follows from it |
+| Repeats | Every hour, Every day, Every weekday, Every week, Every month, or **Custom (text or cron)**: `Weekdays at 9:30`, `every 2 hours`, `0 6 * * *`. **At** and the days follow from the choice; **Next runs** shows when it will run |
 | Time zone | Pre-filled with yours; empty means the service machine's |
-| Agent, Model | Leave empty for the workspace's |
-| Workflow | The prompt, as you'd type it in the chat |
-| Permissions | What it may do, one per line (below) |
-| Max turns, Max cost, Timeout | Empty for the defaults: 50 model calls, $1, 30 minutes |
+| Agent, Model | Leave as **The default agent** and empty for the workspace's |
+| Runs | **Its prompt, as a turn**, or a [workflow](workflows.md) to run |
+| Prompt (or **Its input** for a workflow) | What it does on each run, as you'd type it in the chat; **Rewrite with AI** tightens it |
+| May do without asking | A rule per thing it may do, each a kind (shell, write, delete, web, MCP) and what it covers (below); none: read only |
+| Model calls a run, Cost a run (USD), Time a run | Empty for the defaults (50 calls, $1, 30 minutes); a cap set in Settings › Library › Jobs shows under each, and a value over it is marked |
 | Missed runs | Skip, or Run once |
+
+In an organization workspace the form also has **Runs on** (this computer or your organization's service), and for the service **When it needs more** and **Its changes** ([Organizations](organization.md)).
 
 **Create** saves it as `.agents/workers/<name>/WORKER.md`. It doesn't run yet: open it, read what it may do, and choose **Enable as shown**.
 
@@ -65,14 +68,14 @@ blitz jobs enable deps     # shows what it may do, then asks
 | `model` | the workspace's model | `provider/model`, for its runs only |
 | `workflow` | none | Run this [workflow](workflows.md) instead of a prompt; the text after the front matter, optional then, is its input |
 | `permissions` | none: read only | What it may do (below) |
-| `limits` | 50 calls, $1, `30m` | `max_turns` (model calls), `max_cost_usd`, `timeout` |
+| `limits` | 50 calls, $1, `30m` | `max_turns` (model calls), `max_cost_usd`, `timeout`. `0` means the default, not "no limit" (unlike a guardrail's `limits.md`): ask for a higher number instead |
 | `catch_up` | `none` | `once`: when the service starts or the job is enabled, run once if a scheduled time passed since its last run |
 | `overlap` | `skip` | A run that's due while one is still going is skipped |
 | `runs_on` | `here` | `service`: your organization's Blitz service runs it, on its own schedule, and this computer doesn't ([Jobs on the service](#jobs-on-the-service)) |
 | `on_request` | `refuse` here, `pause` on the service | What a run does when it needs something its permissions don't allow: `refuse` it and go on without, or `pause` and wait for its owner's answer |
 | `merge` | `main` | Where a run on the service leaves its changes: `main` adds them to the workspace's main when they merge cleanly, so they reach everyone's folder; `never` keeps them on the run's own branch for someone to add |
 
-**Schedules** take cron (`30 9 * * 1-5`), descriptors (`@daily`, `@every 90m`) or plain phrases: `hourly`, `every 15 minutes`, `every 2 hours`, `daily at 6 AM`, `weekdays at 9:30`, `weekends at noon`, `every Monday at 8 PM`.
+**Schedules** take cron (`30 9 * * 1-5`), descriptors (`@daily`, `@every 90m`) or plain phrases: `hourly`, `every 15 minutes`, `every 2 hours`, `every 3 days` (every 72 hours from when the schedule starts), `daily at 6 AM`, `weekdays at 9:30`, `weekends at noon`, `every Monday at 8 PM`.
 
 ## What a job may do
 
@@ -80,7 +83,7 @@ Nobody is there to approve anything, so a job gets exactly the permissions it li
 
 | Permission | Allows |
 |---|---|
-| `shell:go test ./...` | That command (a `*` glob matches any words) |
+| `shell:go test ./...` | That command exactly. A `*` matches any words but stops at a `/`: `shell:git add *` allows `git add notes.md`, not `git add reports/deps.md` (write `shell:git add reports/*`, or name the command in full) |
 | `write:reports/` or `write:reports/**` | Writing files anywhere under `reports/`, in folders too (`*` alone stays in one folder: `write:reports/*` is only the files directly in it) |
 | `delete:tmp/*.log` | Deleting matching files |
 | `web:api.github.com` | Fetching from that host (or using that search provider) |
@@ -90,10 +93,13 @@ Reading the workspace never needs permission. A command with `;`, `&`, `|`, `$`,
 
 `[workers.policy]` in your settings governs every job: which kinds of permission are allowed at all, the limits a job that sets none gets (50 calls, $1, 30 minutes), an optional cap on what one may ask for (`max_turns`, `max_cost_usd`, `max_timeout`; none by default since v0.8.4, so a job may set more than the defaults), and how many runs at once across workspaces (`max_concurrent`, 2).
 
+A job's limits cover its whole run, every model call and every step of a `workflow` job. The workspace's [limits guardrail](extending.md) still applies to each turn too (200 model calls and $10 unless `.agents/guardrails/limits.md` sets others), so a job that sets more than that needs the guardrail raised as well. A run stopped at a limit ends **limited**, and its error says which limit stopped it and where to change it: the job's `limits:`, the jobs' defaults or cap in **Settings › Library › Jobs**, or the guardrail's file.
+
 ## Enabling, editing and running
 
 - **Rewrite with AI:** in the job form, **Rewrite with AI** turns rough instructions into ones that run well unattended. It names the sources, says exactly what file to write and in what format, and says what to do when a step fails. It also suggests the narrowest permissions those instructions need. You review it first: **Use these** fills in the form, **Keep mine** leaves it as it was, and nothing is saved until you Save.
 - **Enable** pins the job's content. Edit it (in the app, or by hand) and it pauses as **changed** until you enable it again, so what runs is always what you read.
+- **A job that runs a workflow** pins the workflow too: its steps decide what the job may write and reach, so editing the workflow (or adding or deleting it) pauses the job as **changed** until you enable it again. A run uses the workflow exactly as it was when the run started, and a paused run picks up again only while its job is enabled as it is.
 - **States:** new (never enabled), enabled, disabled, changed, invalid (its problems are listed).
 - **Run now:** **Run now** in the app, or `blitz jobs run <name>`, runs an enabled job at once and shows what it does.
 - **Two at once?** The same job never runs twice at the same time; a scheduled tick that finds it running is recorded as skipped.
@@ -165,5 +171,5 @@ From the terminal, `blitz enterprise jobs` lists the jobs the service runs in yo
 
 - **The service must be running** at the scheduled time. Missed times collapse into one run when it's back if `catch_up: once` is set, and are skipped otherwise; a laptop that's asleep may miss them.
 - **Background runs are different:** `blitz --bg "<prompt>"` runs one prompt in the service now, and waits for you to answer what it asks ([the service](../products/service.md#background-runs)). Jobs run on a schedule and never wait for an approval; only a workflow's Ask a person step pauses one, until someone answers it.
-- **A loop is lighter:** `/loop 30m <prompt>` repeats a prompt while the session or window is open, with your usual approvals.
+- **A loop is lighter:** `/loop 30m <prompt>` repeats a prompt while the terminal session runs, or while its workspace is open in the window (closing the workspace stops its loops), with your usual approvals.
 - **Project jobs and trust:** a workspace's jobs are files in the project, so read them before enabling; project hooks don't run for jobs until you trust the project's settings ([Sharing settings with your team](configuration.md#sharing-settings-with-your-team)).

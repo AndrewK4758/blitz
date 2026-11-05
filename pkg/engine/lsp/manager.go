@@ -40,8 +40,9 @@ type Server struct {
 // ErrNoServer means no language server is configured for the file.
 var ErrNoServer = errors.New("no language server for this kind of file")
 
-// Manager starts language servers as files need them, one per language,
-// and keeps the files it asks about in sync with the disk.
+// Manager starts language servers as files need them, one per language
+// and project root (FS-61a), and keeps the files it asks about in sync
+// with the disk.
 type Manager struct {
 	root    string
 	launch  Launcher
@@ -51,18 +52,21 @@ type Manager struct {
 	life    context.Context
 	end     context.CancelFunc
 	mu      sync.Mutex
-	running map[string]*server   // by language
-	start   map[string]*starting // starts under way, by language
-	failed  map[string]failure   // why a language's server couldn't start
-	since   map[string]time.Time // when each language's server started, or failed to
+	running map[serverKey]*server
+	start   map[serverKey]*starting // starts under way
+	failed  map[serverKey]failure   // why a server couldn't start
+	since   map[serverKey]time.Time // when each server started, or failed to
 	closed  bool
 	scratch string // code blocks' folders outside the workspace (snippet.go)
 
 	docs documents // the editor's (documents.go)
 }
 
-// starting is a server's start, which every caller for its language waits
-// on: s or err once done is closed.
+// serverKey is a server's language and the project root it runs in.
+type serverKey struct{ lang, root string }
+
+// starting is a server's start, which every caller for its language and
+// root waits on: s or err once done is closed.
 type starting struct {
 	done chan struct{}
 	s    *server
@@ -84,11 +88,12 @@ var failedRetry = time.Minute
 func NewManager(root string, servers []Server, launch Launcher) *Manager {
 	life, end := context.WithCancel(context.Background())
 	return &Manager{root: root, launch: launch, servers: servers, life: life, end: end,
-		running: map[string]*server{}, start: map[string]*starting{}, failed: map[string]failure{}, since: map[string]time.Time{}}
+		running: map[serverKey]*server{}, start: map[serverKey]*starting{}, failed: map[serverKey]failure{}, since: map[serverKey]time.Time{}}
 }
 
 type server struct {
 	lang string
+	root string // the project root it runs in
 	c    *conn
 
 	mu      sync.Mutex
@@ -97,7 +102,9 @@ type server struct {
 	opened  []string                  // the agent's open documents' URIs, least recently synced first
 	held    map[string]int            // the editor's documents, by URI: how many hold each
 	diags   map[string]publishedDiags // for open documents only
-	changed chan struct{}             // a diagnostics notification came
+	// changed is closed, and replaced, when a diagnostics notification
+	// comes, so every waiter wakes, whichever file it waits for.
+	changed chan struct{}
 	// onDiags is told of each URI whose diagnostics came (the editor's
 	// watchers); nil for none.
 	onDiags func(uri string)
@@ -115,9 +122,10 @@ type publishedDiags struct {
 // startTimeout bounds starting a server (initialize).
 const startTimeout = 60 * time.Second
 
-// For finds the server for path, starting it if need be. A start runs on
-// its own (startTimeout, or until Close), not on ctx: callers wait for it,
-// each giving up with its own ctx, and other languages go on meanwhile.
+// For finds the server for path, starting it if need be: its language's,
+// in path's project root. A start runs on its own (startTimeout, or until
+// Close), not on ctx: callers wait for it, each giving up with its own
+// ctx, and other servers go on meanwhile.
 func (m *Manager) For(ctx context.Context, path string) (*server, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	var cfg *Server
@@ -131,12 +139,13 @@ func (m *Manager) For(ctx context.Context, path string) (*server, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("%w (%s)", ErrNoServer, ext)
 	}
+	key := serverKey{cfg.Language, m.projectRoot(cfg.Language, path)}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
 		return nil, errClosed
 	}
-	if s := m.running[cfg.Language]; s != nil {
+	if s := m.running[key]; s != nil {
 		select {
 		case <-s.c.done: // it died: start again
 		default:
@@ -144,18 +153,18 @@ func (m *Manager) For(ctx context.Context, path string) (*server, error) {
 			return s, nil
 		}
 	}
-	if f, ok := m.failed[cfg.Language]; ok {
+	if f, ok := m.failed[key]; ok {
 		if time.Since(f.at) < failedRetry {
 			m.mu.Unlock()
 			return nil, f.err
 		}
-		delete(m.failed, cfg.Language)
+		delete(m.failed, key)
 	}
-	st := m.start[cfg.Language]
+	st := m.start[key]
 	if st == nil {
 		st = &starting{done: make(chan struct{})}
-		m.start[cfg.Language] = st
-		go m.startFor(*cfg, st)
+		m.start[key] = st
+		go m.startFor(*cfg, key.root, st)
 	}
 	m.mu.Unlock()
 	select {
@@ -166,16 +175,21 @@ func (m *Manager) For(ctx context.Context, path string) (*server, error) {
 	}
 }
 
-// startFor starts cfg's server for st and records how it went. A server
-// that started after Close is shut down at once.
-func (m *Manager) startFor(cfg Server, st *starting) {
-	s, err := m.startServer(m.life, cfg)
+// startFor starts cfg's server in root for st and records how it went. A
+// server that started after Close is shut down at once.
+func (m *Manager) startFor(cfg Server, root string, st *starting) {
+	key := serverKey{cfg.Language, root}
+	s, err := m.startServer(m.life, cfg, root)
 	if err != nil {
-		err = fmt.Errorf("starting the %s language server (%s): %w", cfg.Language, strings.Join(cfg.Command, " "), err)
+		in := ""
+		if root != m.root {
+			in = " in " + m.shown(root)
+		}
+		err = fmt.Errorf("starting the %s language server (%s)%s: %w", cfg.Language, strings.Join(cfg.Command, " "), in, err)
 	}
 	m.mu.Lock()
-	delete(m.start, cfg.Language)
-	m.since[cfg.Language] = time.Now()
+	delete(m.start, key)
+	m.since[key] = time.Now()
 	switch {
 	case m.closed:
 		if s != nil {
@@ -183,32 +197,32 @@ func (m *Manager) startFor(cfg Server, st *starting) {
 		}
 		s, err = nil, errClosed
 	case err != nil:
-		m.failed[cfg.Language] = failure{err: err, at: time.Now()}
+		m.failed[key] = failure{err: err, at: time.Now()}
 	default:
-		m.running[cfg.Language] = s
+		m.running[key] = s
 	}
 	st.s, st.err = s, err
 	close(st.done)
 	m.mu.Unlock()
 }
 
-func (m *Manager) startServer(ctx context.Context, cfg Server) (*server, error) {
+func (m *Manager) startServer(ctx context.Context, cfg Server, root string) (*server, error) {
 	if len(cfg.Command) == 0 {
 		return nil, errors.New("no command")
 	}
-	proc, err := m.launch(context.Background(), cfg.Command) // lives past ctx
+	proc, err := m.launch(context.Background(), root, cfg.Command) // lives past ctx
 	if err != nil {
 		return nil, err
 	}
-	s := &server{lang: cfg.Language, text: map[string]string{}, version: map[string]int{}, held: map[string]int{}, diags: map[string]publishedDiags{}, changed: make(chan struct{}, 1), onDiags: m.diagnosed}
+	s := &server{lang: cfg.Language, root: root, text: map[string]string{}, version: map[string]int{}, held: map[string]int{}, diags: map[string]publishedDiags{}, changed: make(chan struct{}), onDiags: m.diagnosed}
 	s.c = newConn(proc, s.notified)
 	ictx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
-	root := fileURI(m.root)
-	err = s.c.call(ictx, "initialize", map[string]any{
+	uri := fileURI(root)
+	params := map[string]any{
 		"processId":        os.Getpid(),
-		"rootUri":          root,
-		"workspaceFolders": []any{map[string]any{"uri": root, "name": filepath.Base(m.root)}},
+		"rootUri":          uri,
+		"workspaceFolders": []any{map[string]any{"uri": uri, "name": filepath.Base(root)}},
 		"capabilities": map[string]any{
 			"textDocument": map[string]any{
 				"synchronization": map[string]any{"didSave": false},
@@ -233,7 +247,13 @@ func (m *Manager) startServer(ctx context.Context, cfg Server) (*server, error) 
 			},
 			"workspace": map[string]any{"symbol": map[string]any{}, "configuration": true, "workspaceFolders": true},
 		},
-	}, nil)
+	}
+	if cfg.Language == "typescript" {
+		if lib := m.tsserverLib(root, cfg.Command[0]); lib != "" {
+			params["initializationOptions"] = map[string]any{"tsserver": map[string]any{"path": lib}}
+		}
+	}
+	err = s.c.call(ictx, "initialize", params, nil)
 	if err != nil {
 		proc.Stop()
 		return nil, err
@@ -273,13 +293,36 @@ func (s *server) notified(method string, params json.RawMessage) {
 		s.diags[uri] = publishedDiags{at: time.Now(), version: p.Version, items: p.Diagnostics}
 	}
 	held, onDiags := s.held[uri] > 0, s.onDiags
+	close(s.changed)
+	s.changed = make(chan struct{})
 	s.mu.Unlock()
 	if open && held && onDiags != nil {
 		onDiags(uri)
 	}
-	select {
-	case s.changed <- struct{}{}:
-	default:
+}
+
+// waitDiagnostics is what the server published for uri about the text it
+// has now, waiting up to wait for it: diagnostics about an earlier version
+// (a server answering an edit before last) are about code that's gone,
+// so they're waited past (N26 engine-sub-2#22).
+func (s *server) waitDiagnostics(ctx context.Context, uri string, wait time.Duration) (publishedDiags, bool, error) {
+	deadline := time.After(wait)
+	for {
+		s.mu.Lock()
+		d, ok := s.diags[uri]
+		ok = ok && (d.version == 0 || d.version == s.version[uri])
+		changed := s.changed
+		s.mu.Unlock()
+		if ok {
+			return d, true, nil
+		}
+		select {
+		case <-changed:
+		case <-deadline:
+			return publishedDiags{}, false, nil // nothing reported in time
+		case <-ctx.Done():
+			return publishedDiags{}, false, ctx.Err()
+		}
 	}
 }
 
@@ -593,48 +636,34 @@ func (m *Manager) Diagnostics(ctx context.Context, path string, wait time.Durati
 		return nil, err
 	}
 	uri := fileURI(path)
-	deadline := time.After(wait)
-	for {
-		s.mu.Lock()
-		d, ok := s.diags[uri]
-		s.mu.Unlock()
-		if ok {
-			out := make([]Diagnostic, 0, len(d.items))
-			for _, w := range d.items {
-				sev := "error"
-				if w.Severity > 0 && w.Severity < len(severities) {
-					sev = severities[w.Severity]
-				}
-				loc := m.readable(uri, w.Range.Start)
-				out = append(out, Diagnostic{Line: loc.Line, Column: loc.Column, Severity: sev, Message: w.Message, Source: w.Source})
-			}
-			sort.SliceStable(out, func(i, j int) bool { return out[i].Line < out[j].Line })
-			return out, nil
-		}
-		select {
-		case <-s.changed:
-		case <-deadline:
-			return nil, nil // nothing reported in time
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	d, ok, err := s.waitDiagnostics(ctx, uri, wait)
+	if !ok {
+		return nil, err
 	}
+	out := make([]Diagnostic, 0, len(d.items))
+	for _, w := range d.items {
+		sev := "error"
+		if w.Severity > 0 && w.Severity < len(severities) {
+			sev = severities[w.Severity]
+		}
+		loc := m.readable(uri, w.Range.Start)
+		out = append(out, Diagnostic{Line: loc.Line, Column: loc.Column, Severity: sev, Message: w.Message, Source: w.Source})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Line < out[j].Line })
+	return out, nil
 }
 
 // Running reports whether a server runs for files like path (edits then
 // report diagnostics without starting one).
 func (m *Manager) Running(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
+	cfg := m.config(path)
+	if cfg == nil {
+		return false
+	}
+	key := serverKey{cfg.Language, m.projectRoot(cfg.Language, path)}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, cfg := range m.servers {
-		for _, e := range cfg.Extensions {
-			if strings.EqualFold(e, ext) && m.running[cfg.Language] != nil {
-				return true
-			}
-		}
-	}
-	return false
+	return m.running[key] != nil
 }
 
 // Close shuts the servers down, and ends the starts under way, waiting
@@ -642,7 +671,7 @@ func (m *Manager) Running(path string) bool {
 func (m *Manager) Close() {
 	m.mu.Lock()
 	servers := m.running
-	m.running = map[string]*server{}
+	m.running = map[serverKey]*server{}
 	m.closed = true
 	scratch := m.scratch
 	m.scratch = ""

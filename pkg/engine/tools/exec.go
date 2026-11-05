@@ -55,8 +55,9 @@ type Credential struct {
 }
 
 // credentialsDir holds the copies, one directory per process, removed
-// when it ends: beside the service's socket, which sandboxed commands can
-// read but not write. Not the cache directory, which they can write: a
+// when it ends: beside the service's socket, in the run folder sandboxed
+// commands can read but not write or connect in (bubblewrap binds only
+// this folder back into it). Not the cache directory, which they can write: a
 // command could put a link there, and Blitz, unsandboxed, would follow it
 // (privateDir checks). Tests replace it.
 var credentialsDir = func() (string, error) {
@@ -253,21 +254,36 @@ func (g *guardedCmd) abandon() {
 // Release closes the guard pipe; safe to call more than once.
 func (g *guardedCmd) Release() { g.once.Do(g.release) }
 
+// checkScrubEnv refuses a sandbox.scrub_env pattern that isn't a glob,
+// which would match nothing and let the variable it means through.
+func checkScrubEnv(patterns []string) error {
+	for _, p := range patterns {
+		if _, err := path.Match(p, ""); err != nil {
+			return fmt.Errorf("sandbox.scrub_env: %q isn't a valid pattern: %w", p, err)
+		}
+	}
+	return nil
+}
+
 // scrubEnv drops variables whose names match any pattern (case-insensitive).
 func scrubEnv(env, patterns []string) []string {
 	out := env[:0:0]
 	for _, kv := range env {
 		name, _, _ := strings.Cut(kv, "=")
-		drop := false
-		for _, p := range patterns {
-			if ok, _ := path.Match(strings.ToUpper(p), strings.ToUpper(name)); ok {
-				drop = true
-				break
-			}
-		}
-		if !drop {
+		if !scrubbed(name, patterns) {
 			out = append(out, kv)
 		}
 	}
 	return out
+}
+
+// scrubbed reports whether the variable name matches one of the
+// sandbox.scrub_env patterns (case doesn't matter).
+func scrubbed(name string, patterns []string) bool {
+	for _, p := range patterns {
+		if ok, _ := path.Match(strings.ToUpper(p), strings.ToUpper(name)); ok {
+			return true
+		}
+	}
+	return false
 }

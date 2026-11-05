@@ -19,6 +19,7 @@ go_library(
     srcs = [
         "expr.go",
         "flows.go",
+        "schedule.go",
     ],
     importpath = "github.com/retail-cortex/blitz/pkg/engine/flows",
     visibility = [
@@ -30,6 +31,7 @@ go_library(
     deps = [
         "//pkg/a2ui",
         "//pkg/api",
+        "//pkg/engine/frontmatter",
         "//pkg/engine/gates",
         "@com_github_google_cel_go//cel:go_default_library",
         "@com_github_google_cel_go//common/types:go_default_library",
@@ -44,6 +46,7 @@ go_test(
     srcs = [
         "expr_test.go",
         "flows_test.go",
+        "schedule_test.go",
         "settings_test.go",
     ],
     embed = [":flows"],

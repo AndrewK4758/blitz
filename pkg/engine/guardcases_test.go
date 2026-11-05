@@ -43,7 +43,7 @@ func guardWith(t *testing.T, c guardCase) guard {
 	w := openTest(t)
 	writeGuardrail(t, w, "check", c.file)
 	withJudge(t, w, c.verdicts...)
-	w.startGuardrails("s", new(api.Turn))
+	w.startGuardrails("s", new(api.Turn), "")
 	return guard{w}
 }
 
@@ -123,7 +123,8 @@ func TestGuardToolResultCases(t *testing.T) {
 	})
 }
 
-// An output guardrail judges the whole answer (not its pieces): it
+// An output guardrail judges the whole answer (not its pieces, which one
+// that blocks holds back): it
 // withholds a failing or unjudged answer when it blocks, says when it
 // warns; the secrets guardrail set to warn only says so.
 func TestGuardOutputCases(t *testing.T) {
@@ -139,7 +140,14 @@ func TestGuardOutputCases(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			g := guardWith(t, c)
-			assert.Empty(t, said(g.Output(context.Background(), runtime.GuardCall{Session: "s"}, "Ada", false)), "a piece isn't judged")
+			piece := g.Output(context.Background(), runtime.GuardCall{Session: "s"}, "Ada", false)
+			assert.Empty(t, piece.Notices, "a piece isn't judged")
+			if c.file == block {
+				require.NotNil(t, piece.Text)
+				assert.Empty(t, *piece.Text, "held until the whole answer is judged")
+			} else {
+				assert.Nil(t, piece.Text, "a warning lets it stream")
+			}
 			v := g.Output(context.Background(), runtime.GuardCall{Session: "s"}, "Ada was here.", true)
 			if c.want == "" {
 				assert.Empty(t, said(v))
@@ -151,7 +159,7 @@ func TestGuardOutputCases(t *testing.T) {
 	t.Run("secrets, warning", func(t *testing.T) {
 		w := openTest(t)
 		writeGuardrail(t, w, "secrets", "---\nbuiltin: secrets\naction: warn\n---\n")
-		w.startGuardrails("s", new(api.Turn))
+		w.startGuardrails("s", new(api.Turn), "")
 		g := guard{w}
 		v := g.Output(context.Background(), runtime.GuardCall{Session: "s"}, "AKIAABCDEFGHIJKLMNOP", false)
 		assert.Nil(t, v.Text, "the text stays")

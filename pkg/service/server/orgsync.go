@@ -66,20 +66,26 @@ func (s *Server) gitAs(c *enterprise.Client) orgsync.Git {
 	}
 }
 
+// signedOutSays are what git says when the service didn't take the
+// person's sign-in.
+var signedOutSays = []string{"Authentication failed", "could not read Username", "terminal prompts disabled", "returned error: 401", "HTTP 401"}
+
 // gitOut runs git in dir with the organization's credential helper, giving
 // its output; a failure to sign in is orgsync.ErrSignedOut.
 func (s *Server) gitOut(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	all := append([]string{"-c", "credential.helper=", "-c", "credential.helper=" + s.gitHelper()}, args...)
 	cmd := exec.CommandContext(ctx, "git", all...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	// Git's messages in English, as they're matched below (LANGUAGE is
+	// gettext's, ahead of LC_ALL).
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANGUAGE=C")
 	out, err := cmd.Output()
 	if err != nil {
 		msg := ""
 		if ee, ok := err.(*exec.ExitError); ok {
 			msg = strings.TrimSpace(string(ee.Stderr))
 		}
-		for _, s := range []string{"Authentication failed", "could not read Username", "terminal prompts disabled", "401"} {
+		for _, s := range signedOutSays {
 			if strings.Contains(msg, s) {
 				return out, fmt.Errorf("%w: %s", orgsync.ErrSignedOut, msg)
 			}
@@ -128,10 +134,16 @@ func (s *Server) runSyncs(ctx context.Context, c *enterprise.Client, kick <-chan
 	for {
 		want := map[string]enterprise.Workspace{}
 		remotes := map[string]string{}
-		if c.Status().SignedIn {
+		// Known: signed out (none wanted), or the list and the settings
+		// read. A list or settings that can't be read now (the service
+		// slow, a network blip) leaves the syncs running as they are:
+		// stopping them all on one failed request left every workspace
+		// unsynced until the next look.
+		known := !c.Status().SignedIn
+		if !known {
 			if list, err := c.Workspaces(ctx); err == nil {
-				cfg, err := config.Load(s.configDir)
-				if err == nil {
+				if cfg, err := config.Load(s.configDir); err == nil {
+					known = true
 					folder := s.orgFolder(c, cfg)
 					shared := sharedFor(c.URL())
 					for _, w := range list {
@@ -140,20 +152,26 @@ func (s *Server) runSyncs(ctx context.Context, c *enterprise.Client, kick <-chan
 							want[dir], remotes[dir] = w, remote
 						}
 					}
+				} else {
+					slog.Debug("the organization's workspaces to sync: the settings", "error", err)
+				}
+			} else if ctx.Err() == nil {
+				slog.Debug("the organization's workspaces to sync", "error", err)
+			}
+		}
+		if known {
+			for dir := range running {
+				if _, ok := want[dir]; !ok {
+					stop(dir)
 				}
 			}
-		}
-		for dir := range running {
-			if _, ok := want[dir]; !ok {
-				stop(dir)
-			}
-		}
-		for dir, w := range want {
-			if running[dir] == nil {
-				r := s.startSync(ctx, c, dir, w.Handle, remotes[dir])
-				s.ent.syncs.mu.Lock()
-				running[dir] = r
-				s.ent.syncs.mu.Unlock()
+			for dir, w := range want {
+				if running[dir] == nil {
+					r := s.startSync(ctx, c, dir, w.Handle, remotes[dir])
+					s.ent.syncs.mu.Lock()
+					running[dir] = r
+					s.ent.syncs.mu.Unlock()
+				}
 			}
 		}
 		t := time.NewTimer(every)
@@ -225,8 +243,9 @@ func (s *Server) startSync(parent context.Context, c *enterprise.Client, dir, ha
 			retry = 30 * time.Second
 		}
 		for ctx.Err() == nil {
+			// It always ends with an error: the stream ended, or why.
 			err := c.WatchWorkspace(ctx, handle, func(string, string, string) { sy.Remote() })
-			if err != nil && ctx.Err() == nil {
+			if ctx.Err() == nil {
 				slog.Debug("an organization workspace's stream", "workspace", handle, "error", err)
 			}
 			select {
@@ -246,7 +265,7 @@ func (h configService) GetOrgSync(_ context.Context, r req[pb.GetOrgSyncRequest]
 		return ok(&pb.GetOrgSyncResponse{})
 	}
 	state, why, pairs := syncMsg(sy.State())
-	return ok(&pb.GetOrgSyncResponse{State: state, Error: why, Pairs: pairs})
+	return ok(&pb.GetOrgSyncResponse{State: state, Error: why, Pairs: pairs, Failed: orgsync.Failed(state)})
 }
 
 func (h configService) SaveOrgSync(ctx context.Context, r req[pb.SaveOrgSyncRequest]) (*connect.Response[pb.SaveOrgSyncResponse], error) {
@@ -264,13 +283,13 @@ func (h configService) SaveOrgSync(ctx context.Context, r req[pb.SaveOrgSyncRequ
 		return nil, err
 	}
 	state, why, pairs := syncMsg(st)
-	return ok(&pb.SaveOrgSyncResponse{State: state, Error: why, Pairs: pairs})
+	return ok(&pb.SaveOrgSyncResponse{State: state, Error: why, Pairs: pairs, Failed: orgsync.Failed(state)})
 }
 
 // syncMsg is a sync's state for the window: why it isn't saved, in Git's
 // words, only when it isn't.
 func syncMsg(st orgsync.State) (state, why string, pairs []*pb.OrgSyncPair) {
-	if st.State == orgsync.Offline || st.State == orgsync.Refused || st.State == orgsync.SignedOut {
+	if st.State == orgsync.Offline || st.State == orgsync.Refused || st.State == orgsync.SignedOut || st.State == orgsync.Secrets {
 		why = st.Err
 	}
 	for _, p := range st.Pairs {

@@ -250,9 +250,19 @@ func TestStreamInputProtocol(t *testing.T) {
 		})
 	}
 
+	// An unknown decision denies and says why.
+	got := make(chan api.Decision, 1)
+	go func() {
+		d, _ := s.approve(ctx, api.ApprovalRequest{Tool: "run_shell_command"})
+		got <- d
+	}()
+	req := lines.next("approval_request")
+	send(fmt.Sprintf(`{"type": "approval", "id": %q, "decision": "Once"}`, req["id"]))
+	assert.Contains(t, lines.next("error")["error"], `unknown decision "Once"`)
+	assert.Equal(t, api.DecisionDeny, <-got)
+
 	// Cancelled while waiting: denied.
 	cctx, cancel := context.WithCancel(ctx)
-	got := make(chan api.Decision, 1)
 	go func() {
 		d, _ := s.approve(cctx, api.ApprovalRequest{Tool: "x"})
 		got <- d
@@ -300,6 +310,18 @@ func TestStreamInputPromptAndCancel(t *testing.T) {
 		t.Fatal("cancelling didn't end the stream")
 	}
 	inW.Close()
+}
+
+// The run exits with the last turn's code: a failed turn followed by one
+// that succeeds is a success (CLI-07; N26 cli-1#5).
+func TestStreamInputExitsWithTheLastTurn(t *testing.T) {
+	e := testEnv(t, append(loopReplies(1), genai.NewContentFromText("done", genai.RoleModel))...)
+	sess, _ := e.Storage().CreateSession("", "t", "blitz")
+	out := &syncBuffer{}
+	in := strings.NewReader(`{"type": "user", "text": "second"}` + "\n")
+	err := runStreamInput(context.Background(), e, oneShotOptions{prompt: "first", sessionID: sess.ID, format: formatStreamJSON, stdout: out, maxTurns: 1}, in)
+	assert.NoError(t, err, "the first turn's failure outlived the second's success:\n%s", out.String())
+	assert.Equal(t, 2, strings.Count(out.String(), `"type":"result"`), out.String())
 }
 
 // In text mode a schema's retry prints like the first answer, with the
@@ -356,7 +378,8 @@ func (r *turnRecorder) Run(ctx context.Context, sessionID string, t api.Turn, on
 	return r.Backend.Run(ctx, sessionID, t, on)
 }
 
-// The schema's retry turn runs under the run's own limits and mode.
+// The schema's retry turn runs in the run's mode, under what is left of
+// its limits (N26 cli-2#7).
 func TestOneShotJSONSchemaRetryKeepsTheLimits(t *testing.T) {
 	schema, err := loadSchema(personSchema)
 	require.NoError(t, err)
@@ -370,9 +393,45 @@ func TestOneShotJSONSchemaRetryKeepsTheLimits(t *testing.T) {
 	require.Len(t, r.turns, 2, "the answer and its retry")
 	retry := r.turns[1]
 	assert.True(t, retry.Plan, "plan mode")
-	assert.Equal(t, 7, retry.MaxTurns)
-	assert.Equal(t, 1.5, retry.MaxCostUSD)
-	assert.Equal(t, time.Minute, retry.Timeout)
+	assert.Equal(t, 6, retry.MaxTurns, "the first turn's model call counts")
+	assert.Less(t, retry.MaxCostUSD, 1.5, "the first turn's cost counts")
+	assert.Positive(t, retry.MaxCostUSD)
+	assert.Less(t, retry.Timeout, time.Minute, "the first turn's time counts")
+	assert.Positive(t, retry.Timeout)
+}
+
+// What the --json-schema retry has left of the run's limits, and a limit
+// the first turn used up (N26 cli-2#7).
+func TestRetryLimits(t *testing.T) {
+	first := api.TurnResult{Before: api.Usage{Calls: 2, CostUSD: 0.10}, After: api.Usage{Calls: 5, CostUSD: 0.40}}
+	cases := map[string]struct {
+		o       oneShotOptions
+		elapsed time.Duration
+		turns   int
+		cost    float64
+		timeout time.Duration
+		err     error
+	}{
+		"no limits":     {elapsed: time.Hour},
+		"what is left":  {o: oneShotOptions{maxTurns: 10, maxCostUSD: 0.50, timeout: 15 * time.Minute}, elapsed: 10 * time.Minute, turns: 7, cost: 0.20, timeout: 5 * time.Minute},
+		"turns used up": {o: oneShotOptions{maxTurns: 3}, err: api.ErrMaxTurns},
+		"cost used up":  {o: oneShotOptions{maxCostUSD: 0.30}, err: api.ErrCostLimit},
+		"time used up":  {o: oneShotOptions{timeout: time.Minute}, elapsed: time.Minute, err: api.ErrTimeLimit},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			turns, cost, timeout, err := retryLimits(c.o, first, c.elapsed)
+			if c.err != nil {
+				require.ErrorIs(t, err, c.err)
+				assert.Equal(t, exitMaxTurns, exitCodeFor(err))
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, c.turns, turns)
+			assert.InDelta(t, c.cost, cost, 1e-9)
+			assert.Equal(t, c.timeout, timeout)
+		})
+	}
 }
 
 // syncBuffer is a bytes.Buffer safe to write from a run while a test reads it.
@@ -391,4 +450,45 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// stream-json writes one line per event: the text, tool call and result
+// lines as they were, and notices, workflow steps and task lists as types
+// of their own with every key present (spec_020_cli CLI-21a, N26
+// cli-behaviour).
+func TestStreamJSONHandler(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   api.Event
+		want []string // the JSON lines, in order
+	}{
+		{"text", api.Event{Author: "dev", Text: &api.Text{Text: "hi", Partial: true}},
+			[]string{`{"author":"dev","partial":true,"text":"hi","type":"text"}`}},
+		{"thought", api.Event{Text: &api.Text{Text: "hmm", Thought: true}}, nil},
+		{"tool call", api.Event{ToolCall: &api.ToolCall{Name: "read_file", Args: map[string]any{"path": "a"}}},
+			[]string{`{"args":{"path":"a"},"name":"read_file","type":"tool_call"}`}},
+		{"tool result", api.Event{ToolResult: &api.ToolResult{Name: "read_file", Result: map[string]any{"ok": true}}},
+			[]string{`{"name":"read_file","result":{"ok":true},"type":"tool_result"}`}},
+		{"notice", api.Event{Notice: &api.Notice{Text: "A guardrail stopped the turn. Send continue to go on.", Error: true}},
+			[]string{`{"author":"","error":true,"text":"A guardrail stopped the turn. Send continue to go on.","transient":false,"type":"notice"}`}},
+		{"transient notice", api.Event{Author: "qa", Notice: &api.Notice{Text: "Retrying", Transient: true}},
+			[]string{`{"author":"qa","error":false,"text":"Retrying","transient":true,"type":"notice"}`}},
+		{"workflow step", api.Event{Step: &api.FlowStep{Workflow: "release", ID: "build", Title: "Build it", Type: "agent", Index: 2, Count: 3, Status: api.StepDone, Output: "ok", Run: "run-1"}},
+			[]string{`{"count":3,"error":"","id":"build","index":2,"output":"ok","run":"run-1","status":"done","step_type":"agent","title":"Build it","type":"workflow_step","workflow":"release"}`}},
+		{"tasks", api.Event{Author: "dev", Tasks: []api.Task{{Content: "write it", Status: "done"}, {Content: "test it", Status: "in_progress"}}},
+			[]string{`{"author":"dev","tasks":[{"content":"write it","status":"done"},{"content":"test it","status":"in_progress"}],"type":"tasks"}`}},
+		{"tasks cleared", api.Event{Tasks: []api.Task{}}, []string{`{"author":"","tasks":[],"type":"tasks"}`}},
+		{"nothing", api.Event{}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var b bytes.Buffer
+			streamJSONHandler(json.NewEncoder(&b))(tt.ev)
+			got := strings.Split(strings.TrimSpace(b.String()), "\n")
+			if b.Len() == 0 {
+				got = nil
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
