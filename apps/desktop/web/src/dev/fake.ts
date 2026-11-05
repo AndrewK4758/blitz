@@ -37,6 +37,28 @@ import { AgentFileSchema, AgentScope, EvalResultSchema, ConflictChoice, GitOpera
 const fakeSignedIn = new Set<string>();
 /** Whether the page's address has ?name (the fake's switches). */
 const fakeParam = (name: string) => new URLSearchParams(location.search).has(name);
+
+// The organization's service this computer is connected to (?org starts
+// connected), and whether the person is signed in to it.
+const fakeOrg = { url: fakeParam("org") ? "https://blitz.acme.com" : "", signedIn: fakeParam("signedin"), termsAccepted: false };
+function fakeOrgState(checked: boolean) {
+  if (!fakeOrg.url) return {};
+  return {
+    url: fakeOrg.url,
+    name: "Acme Assist",
+    version: "1.0.0",
+    capabilities: ["gateway", "jobs"],
+    signedIn: fakeOrg.signedIn,
+    email: fakeOrg.signedIn ? "ana@acme.com" : "",
+    personName: fakeOrg.signedIn ? "Ana Kim" : "",
+    roles: fakeOrg.signedIn ? (fakeParam("admin") ? ["admin", "member"] : ["member"]) : [],
+    renewsUnix: fakeOrg.signedIn ? BigInt(Math.floor(Date.now() / 1000) + 540) : 0n,
+    checked,
+    reachable: checked,
+    // ?managed: device management set it (EN-10).
+    managed: fakeParam("managed"),
+  };
+}
 const fakeTools: Record<string, string> = { google: "gcloud", anthropic: "ant", aws: "aws", azure: "az" };
 function fakeSignIn(provider: string) {
   const found = provider === "google" || provider === "aws";
@@ -265,7 +287,7 @@ function fakeTask(s: State, id: string) {
 }
 
 // The shop workspace's .blitz/settings.toml: a deny rule, and a hook, an
-// MCP server and an allow rule waiting for trust (spec_project_config_031).
+// MCP server and an allow rule waiting for trust (spec_031_project_config).
 function fakeProject(s: State) {
   if (!s.sessions[0].workspace.endsWith("shop")) return { state: "none", files: [], applied: [], pending: [], ignored: [], problems: [] };
   const trust = s.projectTrust ?? "new";
@@ -705,7 +727,7 @@ const fakeGuards: FakeGuard[] = [
   { name: "no-branch-delete", builtin: "", stage: "action", action: "block", agents: [], tools: ["run_shell_command"], description: "Branches stay", pii: false, judge: false, off: false, text: "Deleting a git branch, locally or on the remote." },
 ];
 const fakeGuardFile = (workspace: string, g: FakeGuard) => ({ ...g, path: `${workspace}/.agents/guardrails/${g.name}.md`, problem: "", editable: true });
-// Studio's connectors (spec_connectors_047): the databases category and
+// Studio's connectors (spec_047_connectors): the databases category and
 // its four kinds (English only: the real descriptors carry Spanish and
 // French); a read-only Postgres with a query of its own, a SQLite file
 // that came with the workspace (not trusted yet), and BigQuery for every
@@ -756,7 +778,7 @@ const fakeConnectorCategory = {
   origin: "builtin",
 };
 // The connector calls Studio and Settings share: the workspace's
-// connections and the global ones (spec_connectors_047 CON-18).
+// connections and the global ones (spec_047_connectors CON-18).
 const fakeConnectorCalls = {
   save: (workspace: string, c: Connector, previousName: string, secretValues: Record<string, string>) => {
     if (!/^[a-z][a-z0-9_]{0,39}$/.test(c.name)) return { problems: [`name "${c.name}": lower case letters, digits and _, starting with a letter`] };
@@ -845,6 +867,78 @@ const fakeWorkers: FakeWorker[] = [
     path: "workers/broken-digest/WORKER.md",
     problems: ['schedule "whenever": use a cron expression, a descriptor or plain text like "Daily at 6 AM"'],
     spec: fakeSpec("broken-digest", { schedule: "whenever", prompt: "Write a digest of open issues." }),
+  },
+  // Run by the organization's service (EN-42): its runs are the service's.
+  {
+    name: "sales-digest",
+    description: "Writes last week's sales by region, with a chart, every Monday.",
+    state: WorkerState.NEW,
+    schedule: "Mondays at 06:00",
+    cron: "0 6 * * 1",
+    timezone: "America/Chicago",
+    hash: "5e1d",
+    path: "workers/sales-digest/WORKER.md",
+    runsOn: "service",
+    limits: { maxTurns: 30, maxCostUsd: 1 },
+    spec: fakeSpec("sales-digest", { schedule: "Mondays at 06:00", timezone: "America/Chicago", prompt: "Write last week's sales by region to out/sales.csv, with a chart." }),
+  },
+];
+
+// The catalog's reviews (EN-36).
+const fakeOrgItems = [
+  { kind: "agent", name: "brand-voice", path: "agents/brand-voice.md", lock: "locked", groups: [], overridden: false },
+  { kind: "agent", name: "analyst", path: "agents/analyst.md", lock: "default", groups: ["sales"], overridden: false },
+  { kind: "skill", name: "quarterly-report", path: "skills/quarterly-report/SKILL.md", lock: "default", groups: [], overridden: false },
+  { kind: "rule", name: "no-customer-data", path: "rules/no-customer-data.md", lock: "locked", groups: [], overridden: false },
+  { kind: "rule", name: "house-style", path: "rules/house-style.md", lock: "default", groups: [], overridden: false },
+  { kind: "guardrail", name: "pii", path: "guardrails/pii.md", lock: "locked", groups: ["eng", "sales"], overridden: false },
+];
+const fakeNotices = { email: true, webhook: "", everyRun: false, emailAvailable: true };
+const fakeReviews: { id: string; title: string; byEmail: string; paths: string[]; problems: string[]; state: string; note: string; version: number; created: ReturnType<typeof now> }[] = [
+  { id: "rev-1", title: "Publish agent writer", byEmail: "ana@acme.com", paths: ["agents/writer.md"], problems: [], state: "approved", note: "", version: 7, created: timestampFromDate(new Date(Date.now() - 50 * 3600e3)) },
+  { id: "rev-2", title: "Publish rule short-answers", byEmail: "bo@acme.com", paths: ["rules/short-answers.md"], problems: [], state: "rejected", note: "Too strict for support.", version: 0, created: timestampFromDate(new Date(Date.now() - 120 * 3600e3)) },
+];
+
+// The organization's workspaces the person has a role in.
+const fakeOrgWorkspaces: { handle: string; name: string; role: string; sync: boolean; dir: string; cloned: boolean }[] = [
+  { handle: "plans", name: "Plans", role: "editor", sync: true, dir: "/home/me/Blitz/Acme Assist/plans", cloned: true },
+  { handle: "q4-launch", name: "Q4 Launch", role: "owner", sync: true, dir: "/home/me/Blitz/Acme Assist/q4-launch", cloned: false },
+];
+
+// The service's runs of sales-digest, newest first, and what each left.
+const fakeServiceSet = "urn:blitz:artifacts:9b2f0c4e-1d2a-4b7e-9f00-1c2d3e4f5a6b:51aa7e10-0b6c-4c2a-8d1e-2f3a4b5c6d7e";
+const fakeServicePushed = new Set<string>();
+const fakeServiceJob = { id: "51aa7e10-0b6c-4c2a-8d1e-2f3a4b5c6d7e", urn: "urn:blitz:jobs:51aa7e10-0b6c-4c2a-8d1e-2f3a4b5c6d7e", name: "sales-digest", schedule: "Mondays at 06:00", enabled: true };
+const fakeServiceRuns: { id: string; trigger: string; status: string; output?: string; note?: string; costUsd: number; created: ReturnType<typeof now>; branch?: string; merged?: boolean; mergeNote?: string; artifacts: string; pending?: { tool: string; kind: string; detail: string } }[] = [
+  {
+    id: "7a7a7a7a-7b1c-4d2e-a3f4-5b6c7d8e9f00",
+    trigger: "schedule",
+    status: "paused",
+    output: "The numbers are ready. To publish them, I need to upload the chart to the team drive.",
+    costUsd: 0.0412,
+    created: timestampFromDate(new Date(Date.now() - 2 * 3600e3)),
+    artifacts: `${fakeServiceSet}:7a7a7a7a-7b1c-4d2e-a3f4-5b6c7d8e9f00`,
+    pending: { tool: "run_shell_command", kind: "shell", detail: "gsutil cp out/sales-by-region.png gs://acme-team/" },
+  },
+  {
+    id: "e8030f9a-7b1c-4d2e-a3f4-5b6c7d8e9f01",
+    trigger: "schedule",
+    status: "succeeded",
+    output: "Sales were up 4% on the week; the West led. The table and chart are in the run's files.",
+    costUsd: 0.0831,
+    created: timestampFromDate(new Date(Date.now() - 26 * 3600e3)),
+    branch: "blitz/jobs/sales-digest/e8030f9a-7b1c-4d2e-a3f4-5b6c7d8e9f01",
+    mergeNote: "its job keeps its changes on their branch (merge: never)",
+    artifacts: `${fakeServiceSet}:e8030f9a-7b1c-4d2e-a3f4-5b6c7d8e9f01`,
+  },
+  {
+    id: "0c0ffee0-7b1c-4d2e-a3f4-5b6c7d8e9f02",
+    trigger: "schedule",
+    status: "failed",
+    note: "its owner is no longer a Runner of its workspace",
+    costUsd: 0,
+    created: timestampFromDate(new Date(Date.now() - 194 * 3600e3)),
+    artifacts: `${fakeServiceSet}:0c0ffee0-7b1c-4d2e-a3f4-5b6c7d8e9f02`,
   },
 ];
 
@@ -1188,7 +1282,7 @@ const fakeOutputs: Record<string, string> = {
 };
 const fakeSpend: Record<string, [number, number, number, string[]]> = { "look-up": [3100, 410, 0.0052, ["gemini-4-argon"]], draft: [6300, 800, 0.0112, ["gemini-4-argon", "gemini-4-flash"]] };
 
-// The workspace dashboard (spec_health_044): the fake's items with facts,
+// The workspace dashboard (spec_044_health): the fake's items with facts,
 // most of them judged, a check that judges what changed item by item.
 const fakeDaily = (seed: number) => Array.from({ length: 30 }, (_, i) => ((i * 7 + seed * 3) % 5 === 0 ? 0 : (i + seed) % 4));
 const fakeVerdict = (overall: number, lines: [string, number, string][], summary: string, fixes: string[], current = true) =>
@@ -1861,7 +1955,13 @@ export function installFake() {
             },
           ],
           kinds: [...fakeConnectorKinds, { id: "mysql", category: "databases", name: en("MySQL"), backend: "toolbox", origin: "workspace", path: `${workspace}/.agents/connectors/kinds/mysql.yaml`, problem: 'source "mysql": not in Blitz\'s Toolbox' }],
-          connections: fakeConnectors.map((d) => fakeConnectorMsg(workspace, d)),
+          connections: [
+            ...fakeConnectors.map((d) => fakeConnectorMsg(workspace, d)),
+            // The organization's (EN-30): ?org&signedin.
+            ...(fakeOrg.signedIn
+              ? [{ ...fakeConnectorMsg(workspace, { ...fakeConnectors[0], name: "warehouse", description: "Acme's sales warehouse" }), scope: "org-locked", trusted: true, path: "~/.blitz/enterprise/blitz.acme.com/catalog/locked/connectors/databases/warehouse.yaml" }]
+              : []),
+          ],
           workspaceDir: `${workspace}/.agents/connectors`,
           globalDir: "~/.blitz/connectors",
         }),
@@ -2328,7 +2428,7 @@ export function installFake() {
         trustSkillScripts: ({ dir, hash }) => (fakeTrusted.set(dir.split("/").pop()!, hash), {}),
         getSkillReview: () => ({}),
         listSkillRegistries: () => ({ registries: fakeRegistries, installed: fakeInstalledSkills }),
-        // Browser profiles (spec_browser_profiles_049), kept in the page.
+        // Browser profiles (spec_049_browser_profiles), kept in the page.
         listBrowserProfiles: ({ workspace }) => ({ profiles: fakeProfiles.map((p) => ({ ...p })), workspaceProfile: fakeProfileOf.get(workspace) ?? "", show: "ask", open: "ask" }),
         createBrowserProfile: ({ name }) => {
           if (fakeProfiles.some((p) => p.name === name)) throw new ConnectError(`a browser profile named "${name}" exists`, Code.InvalidArgument);
@@ -2484,8 +2584,222 @@ export function installFake() {
           fakeSignedIn.delete(provider);
           return { status: fakeSignIn(provider) };
         },
+        // The organization's service: any https address connects, as Acme
+        // Assist; signing in takes a moment in the "browser".
+        getEnterprise: () => ({ state: fakeOrgState(true) }),
+        connectEnterprise: ({ url }) => {
+          if (url && !url.startsWith("https://")) throw new ConnectError("the organization's service is reached over https", Code.InvalidArgument);
+          fakeOrg.url = url.replace(/\/$/, "");
+          fakeOrg.signedIn = false;
+          return { state: fakeOrgState(!!url) };
+        },
+        enterpriseSignIn: async function* () {
+          if (!fakeOrg.url) throw new ConnectError("connect to your organization's service first", Code.FailedPrecondition);
+          yield { url: "https://accounts.example.com/o/oauth2/auth?client_id=blitz-desktop" };
+          await sleep(1500);
+          fakeOrg.signedIn = true;
+          yield { done: true, state: fakeOrgState(false) };
+        },
+        // ?org&brand: the organization has its own look; ?terms: a version
+        // of its terms waits to be accepted.
+        getBranding: () =>
+          fakeOrg.url && fakeParam("brand")
+            ? {
+                branding: {
+                  name: "Acme Assist",
+                  shortName: "Acme",
+                  accent: "#7b3fe4",
+                  accentDark: "#c4a5ff",
+                  support: "https://acme.example/help",
+                  about: "Acme's assistant for its engineers, with Acme's models and rules.",
+                  images: { "logo.svg": "data:image/svg+xml;base64," + btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#7b3fe4"/><path d="M8 16l4-9 4 9" stroke="#fff" stroke-width="2" fill="none"/></svg>') },
+                  documents: [
+                    { document: "terms", version: "2026-11", text: "## Acceptable use\n\nUse Acme Assist for Acme's work only. Don't paste customers' personal data." },
+                    { document: "privacy", version: "1", url: "https://acme.example/privacy" },
+                  ],
+                },
+              }
+            : {},
+        getTerms: () =>
+          fakeOrg.termsAccepted || !fakeParam("terms")
+            ? { version: fakeParam("terms") ? "2026-11" : "", accepted: true }
+            : { version: "2026-11", accepted: false, text: "## Acceptable use\n\nUse Acme Assist for Acme's work only. Don't paste customers' personal data.\n\n- Keep secrets out of prompts.\n- Check what the agent changes before you ship it." },
+        acceptTerms: () => {
+          fakeOrg.termsAccepted = true;
+          return { state: fakeOrgState(false) };
+        },
+        listOrgWorkspaces: () => {
+          if (!fakeOrg.url) throw new ConnectError("connect to your organization's service first", Code.FailedPrecondition);
+          return { organization: "Acme Assist", workspaces: fakeOrgWorkspaces };
+        },
+        createOrgWorkspace: async ({ name, personal }) => {
+          await sleep(600);
+          const handle = (personal ? "~me/" : "") + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+          if (fakeOrgWorkspaces.some((w) => w.handle === handle)) throw new ConnectError("a workspace has that handle already", Code.FailedPrecondition);
+          const w = { handle, name, role: "owner", sync: true, dir: `/home/me/Blitz/Acme Assist/${handle}`, cloned: false };
+          fakeOrgWorkspaces.push(w);
+          return { workspace: w };
+        },
+        // A folder shared where it is; one named "leaky" holds a key (EN-66).
+        shareWithOrganization: async ({ workspace, name, personal }) => {
+          await sleep(1200);
+          if (workspace.includes("leaky") || name.toLowerCase().includes("leaky"))
+            throw new ConnectError("nothing was shared: the folder or its history holds what look like secrets: config.py:1 (AWS access key AKIA••••••••••••). Remove them from the files and the history, or mark a false alarm with blitz:allow-secret on its line", Code.FailedPrecondition);
+          const handle = (personal ? "~me/" : "") + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+          const w = { handle, name, role: "owner", sync: true, dir: workspace, cloned: true };
+          fakeOrgWorkspaces.push(w);
+          return { workspace: w, notes: ["Your changes not yet committed were committed first, as “Shared with Acme Assist”."] };
+        },
+        openOrgWorkspace: async ({ handle }) => {
+          await sleep(800);
+          return { dir: `/home/me/Blitz/Acme Assist/${handle}`, cloned: true };
+        },
+        // The service's runs going now: sales-digest's own run now, while it runs (8 s), then it succeeds.
+        watchServiceRuns: async function* (_req, ctx) {
+          if (!fakeOrg.url || !fakeOrg.signedIn) throw new ConnectError("connect to your organization's service first", Code.FailedPrecondition);
+          let last = "";
+          for (;;) {
+            const going = fakeServiceRuns.filter((r) => r.status === "running");
+            const sig = going.map((r) => r.id).join("|");
+            if (sig !== last) {
+              const change = last && { runId: last.split("|")[0], jobId: fakeServiceJob.id, workspace: "plans", dir: "/home/me/Blitz/Acme Assist/plans", status: "succeeded" };
+              last = sig;
+              yield {
+                listed: true,
+                change: change || undefined,
+                runs: going.map((run) => ({ run, jobId: fakeServiceJob.id, jobName: fakeServiceJob.name, workspace: "plans", dir: "/home/me/Blitz/Acme Assist/plans" })),
+              };
+            }
+            for (const r of going) if (Date.now() - Number(r.created?.seconds ?? 0n) * 1000 > 8000) r.status = "succeeded";
+            await sleep(500);
+            if (ctx?.signal.aborted) return;
+          }
+        },
+        // The person's usage and limits (EN-24): ?budget nearly spent.
+        // Publish to organization (EN-36): ?admin is one of its Admins.
+        listPublishable: () => ({
+          items: [
+            { kind: "agent", name: "reviewer", path: "agents/reviewer.md", problems: [], lock: "default", groups: [] },
+            { kind: "skill", name: "release-notes", path: "skills/release-notes/SKILL.md", problems: [], lock: "default", groups: [] },
+            { kind: "rule", name: "no-secrets", path: "rules/no-secrets.md", problems: [], lock: "locked", groups: ["eng"] },
+            { kind: "agent", name: "draft", path: "agents/draft.md", problems: ["agents/draft.md: the front matter needs a description"], lock: "default", groups: [] },
+          ],
+        }),
+        publishToOrganization: async ({ items, title }) => {
+          await sleep(700);
+          const review = { id: `rev-${Date.now()}`, title: title || `Publish ${items.map((i) => `${i.kind} ${i.name}`).join(", ")}`, byEmail: "ana@acme.com", paths: items.map((i) => `${i.kind}s/${i.name}.md`), problems: [], state: "open", note: "", version: 0, created: now() };
+          fakeReviews.unshift(review);
+          return { review };
+        },
+        listCatalogReviews: () => ({ reviews: fakeReviews }),
+        // Job notices (JB-31): ?org&signedin.
+        getOrgNotices: () => ({ notices: fakeNotices }),
+        setOrgNotices: async ({ notices }) => {
+          await sleep(300);
+          if (notices?.webhook && !notices.webhook.startsWith("https://")) throw new ConnectError("a webhook is an https:// address", Code.InvalidArgument);
+          Object.assign(fakeNotices, notices);
+          return { notices: fakeNotices };
+        },
+        // The organization's items in Studio's lists (EN-34): ?org&signedin.
+        listOrgItems: ({ kind }) => ({
+          version: 7,
+          items: fakeOrg.signedIn ? fakeOrgItems.filter((i) => !kind || i.kind === kind) : [],
+        }),
+        copyOrgItem: async ({ kind, name }) => {
+          await sleep(400);
+          const it = fakeOrgItems.find((i) => i.kind === kind && i.name === name);
+          if (!it || it.lock === "locked") throw new ConnectError(`the organization's ${kind} ${name} is locked: its Admins change it, through a review`, Code.FailedPrecondition);
+          it.overridden = true;
+          return { paths: [`.agents/${it.path}`] };
+        },
+        getOrgUsage: () => ({
+          today: [
+            { model: "claude-sonnet-5-5", requests: 42n, inputTokens: 380_000n, outputTokens: 41_000n, costUsd: 1.84 },
+            { model: "gemini-4-flash", requests: 120n, inputTokens: 900_000n, outputTokens: 60_000n, costUsd: 0.31 },
+          ],
+          month: [{ model: "claude-sonnet-5-5", requests: 812n, inputTokens: 7_400_000n, outputTokens: 790_000n, costUsd: 36.2 }],
+          limits: [
+            { scopeKind: "person", period: "day", unit: "usd", model: "", amountUsd: 5, used: { costUsd: fakeParam("budget") ? 4.7 : 2.15 }, resets: timestampFromDate(new Date(Date.now() + 9 * 3600e3)) },
+            { scopeKind: "group", period: "month", unit: "tokens", model: "claude-sonnet-5-5", tokens: 20_000_000n, used: { inputTokens: 7_400_000n, outputTokens: 790_000n }, resets: timestampFromDate(new Date(Date.now() + 12 * 24 * 3600e3)) },
+          ],
+          rateLimits: [{ model: "claude-sonnet-5-5", personRpm: 20, tpm: 400_000 }],
+          promptLogs: true,
+        }),
+        listServiceApprovals: () => ({
+          runs: fakeServiceRuns
+            .filter((r) => r.status === "paused")
+            .map((run) => ({ run, jobId: fakeServiceJob.id, jobName: fakeServiceJob.name, workspace: "plans", dir: "/home/me/Blitz/Acme Assist/plans" })),
+        }),
+        answerServiceRun: ({ runId }) => {
+          const run = fakeServiceRuns.find((r) => r.id === runId && r.status === "paused");
+          if (!run) throw new ConnectError("that run isn't waiting for an answer", Code.FailedPrecondition);
+          run.status = "running";
+          run.pending = undefined;
+          return { run };
+        },
+        // A job the service hasn't got says why: ?unpushed for one not on
+        // main (until Push to main), ?notservice for one it doesn't run.
+        getServiceJob: ({ name }) => {
+          if (fakeParam("unpushed") && !fakeServicePushed.has(name)) return { found: false, runs: [], reason: "not_pushed" };
+          if (fakeParam("notservice")) return { found: false, runs: [], reason: "not_service", detail: "its WORKER.md doesn't read: schedule \"whenever\" isn't a schedule" };
+          if (name === "sales-digest" || fakeServicePushed.has(name)) return { found: true, job: { ...fakeServiceJob, name }, runs: name === "sales-digest" && !fakeServicePushed.has(name) ? fakeServiceRuns : [] };
+          return { found: false, runs: [], reason: "not_read" };
+        },
+        pushServiceJob: ({ name }) => {
+          fakeServicePushed.add(name);
+          return { job: { found: true, job: { ...fakeServiceJob, name }, runs: [] } };
+        },
+        runServiceJob: () => {
+          const run = { id: `run-${Date.now()}`, trigger: "now", status: "running", costUsd: 0, created: now(), artifacts: `${fakeServiceSet}:${Date.now()}` };
+          fakeServiceRuns.unshift(run as (typeof fakeServiceRuns)[number]);
+          return { run };
+        },
+        setServiceJobEnabled: ({ enabled }) => {
+          fakeServiceJob.enabled = enabled;
+          return {};
+        },
+        listServiceRunFiles: ({ artifacts }) => ({
+          files: artifacts.endsWith("9f01")
+            ? [
+                { urn: `${artifacts}/events.jsonl`, path: "events.jsonl", size: 48213n, mediaType: "application/jsonl" },
+                { urn: `${artifacts}/out/sales-by-region.csv`, path: "out/sales-by-region.csv", size: 1820n, mediaType: "text/csv" },
+                { urn: `${artifacts}/out/sales-by-region.png`, path: "out/sales-by-region.png", size: 64410n, mediaType: "image/png" },
+              ]
+            : [],
+        }),
+        // Add to my workspace: the run's changes onto main.
+        takeServiceRun: ({ runId }) => {
+          const run = fakeServiceRuns.find((r) => r.id === runId);
+          if (run) Object.assign(run, { merged: true, mergeNote: "" });
+          return { run };
+        },
+        saveServiceRunFile: ({ urn }) => ({ path: `/home/me/Downloads/${urn.split("/").pop()}` }),
+        getOrgSync: ({ workspace }) =>
+          workspace.includes("/Blitz/Acme Assist/")
+            ? fakeParam("conflict")
+              ? { state: "conflicts", pairs: [{ shared: "plan.md", mine: "plan (conflict, Ana).md" }] }
+              : fakeParam("refused")
+                ? { state: "refused", pairs: [], error: "exit status 1: error: remote unpack failed: reference delta not found" }
+                : { state: "saved", pairs: [] }
+            : { state: "", pairs: [] },
+        // Save now: the refused one stays refused, as the dev service did.
+        saveOrgSync: () => (fakeParam("refused") ? { state: "refused", pairs: [], error: "exit status 1: error: remote unpack failed: reference delta not found" } : { state: "saved", pairs: [] }),
+        enterpriseSignOut: () => {
+          fakeOrg.signedIn = false;
+          return { state: fakeOrgState(false) };
+        },
         listModels: ({ providers }) =>
-          // Ollama answers with ?ollama (it runs on the machine), else it isn't there.
+          // Connected to an organization, its models are the models.
+          fakeOrg.url && (providers.length === 0 || providers.includes("enterprise"))
+            ? {
+                defaultProvider: "enterprise",
+                providers: [
+                  fakeOrg.signedIn
+                    ? { provider: "enterprise", ids: ["fast", "smart"], models: [{ id: "fast", displayName: "Gemini Flash", hasPrice: true, inputPerMtok: 0.75, outputPerMtok: 3.75, capabilities: { tools: true, images: true, thinking: false, context: 1_000_000 } }, { id: "smart", displayName: "Claude Opus", isDefault: true, hasPrice: true, inputPerMtok: 5, outputPerMtok: 25, capabilities: { tools: true, images: true, thinking: true, context: 200_000 } }] }
+                    : { provider: "enterprise", error: "sign in to your organization to use its models" },
+                ],
+              }
+            : // Ollama answers with ?ollama (it runs on the machine), else it isn't there.
           providers.length === 1 && providers[0] === "ollama"
             ? { defaultProvider: "gemini", providers: [fakeParam("ollama") ? { provider: "ollama", ids: ["llama4:8b", "qwen3:14b"] } : { provider: "ollama", error: "connection refused" }] }
             : {
@@ -2844,6 +3158,15 @@ export function installFake() {
           const w: FakeWorker = { workspace, name: r.name, description: r.description, state: WorkerState.NEW, schedule: r.schedule, cron: "0 6 * * *", timezone: r.timezone, agent: r.agent, model: r.model, permissions: r.permissions, path: `${workspace}/.agents/workers/${r.name}/WORKER.md`, hash: "sha256:new", problems: [], spec };
           fakeWorkers.unshift(w);
           return { worker: w };
+        },
+        // A job moved to the organization's service (EN-40, EN-41): nightly-deps can't go as it is.
+        moveWorkerToService: ({ name, force }) => {
+          const problems = name === "nightly-deps" ? ["the MCP server github is a program on this computer (npx): the service can't start it", "it reaches localhost:5432, which on the service is the runner itself"] : [];
+          const w = fakeWorkers.find((x) => x.name === name);
+          if (!w) throw new ConnectError(`no worker ${name}`, Code.NotFound);
+          if (problems.length && !force) return { problems, moved: false };
+          w.runsOn = "service";
+          return { problems, moved: true, worker: w };
         },
         listWorkers: ({ workspace }) => ({ workers: workspace === fakeHome ? fakeGlobal : fakeWorkers }),
         // The schedule picker's preview: the picker's own cron forms, roughly

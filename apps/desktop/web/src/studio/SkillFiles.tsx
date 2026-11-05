@@ -51,7 +51,7 @@ import { t } from "../i18n";
 import type { SkillFile } from "../gen/blitz/v1/workspace_pb";
 import { Preview } from "../files/Preview";
 import { previewKind, previewOnly, type PreviewKind } from "../files/previewKind";
-import { Button, Dialog, Icon, IconButton, Segmented, useSnackbar } from "../ui/controls";
+import { Button, Dialog, Icon, IconButton, Segmented, useSnackbar } from "@blitz/webui";
 import { CodeArea } from "./CodeArea";
 import { DraftButton } from "./Draft";
 import { activePackageFiles, filePath, languageOfScript, packageKind, packageTemplate, scriptLanguages, scriptTemplate, splitArgs, type ScriptLanguage } from "./skillForm";
@@ -75,7 +75,7 @@ interface RunResult {
 }
 
 /**
- * A skill's References or Scripts tab (spec_skills_013 SK-101, SK-102),
+ * A skill's References or Scripts tab (spec_013_skills SK-101, SK-102),
  * as a list and a file, the way Studio's lists and forms are: the files
  * in references/ or scripts/ fill the tab (a script with its language,
  * where it comes from and the policy's verdict), with New file (and

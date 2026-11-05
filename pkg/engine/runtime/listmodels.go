@@ -25,11 +25,12 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/retail-cortex/blitz/pkg/config"
+	"github.com/retail-cortex/blitz/pkg/enterprise"
 	"google.golang.org/genai"
 )
 
 // ProviderModels are the models a configured provider offers
-// (spec_parity_027 PAR-MOD-03), or why they couldn't be listed.
+// (spec_027_parity PAR-MOD-03), or why they couldn't be listed.
 type ProviderModels struct {
 	Provider string
 	Models   []ListedModel
@@ -42,15 +43,29 @@ type ProviderModels struct {
 type ListedModel struct {
 	ID    string
 	Price *config.ModelPrice
+	// DisplayName and Default are the organization's, for its models.
+	DisplayName string
+	Default     bool
+	// Caps are what the organization says its model can do (EN-21); nil
+	// when it says nothing, and for every other provider's.
+	Caps *enterprise.Capabilities
 }
 
 // listTimeout bounds each provider's listing.
 const listTimeout = 20 * time.Second
 
 // ConfiguredProviders are the providers cfg has credentials (or, for
-// Ollama, a choice) for.
+// Ollama, a choice) for. Connected to an organization, its service first,
+// alone unless its policy allows the person's own beside it
+// (spec_053_enterprise EN-20, EN-35).
 func ConfiguredProviders(cfg *config.Config) []string {
 	var out []string
+	if cfg.Enterprise.URL != "" {
+		out = []string{"enterprise"}
+		if !cfg.Org.Policy.Models.OwnProviders {
+			return out
+		}
+	}
 	if cfg.LLM.Gemini.APIKey != "" || cfg.LLM.Gemini.APIKeyCommand != "" || cfg.LLM.Gemini.UsesADC() {
 		out = append(out, "gemini")
 	}
@@ -90,6 +105,10 @@ func ListModels(ctx context.Context, cfg *config.Config, providers ...string) []
 			defer func() { done <- struct{}{} }()
 			lctx, cancel := context.WithTimeout(ctx, listTimeout)
 			defer cancel()
+			if p == "enterprise" {
+				out[i] = listEnterprise(lctx, cfg)
+				return
+			}
 			ids, err := listProvider(lctx, cfg, p)
 			sort.Strings(ids)
 			pm := ProviderModels{Provider: p, Err: err}
@@ -194,4 +213,32 @@ func contains(list []string, v string) bool {
 		}
 	}
 	return false
+}
+
+// listEnterprise is the organization's models the person may use, at its
+// prices (EN-21).
+func listEnterprise(ctx context.Context, cfg *config.Config) ProviderModels {
+	pm := ProviderModels{Provider: "enterprise"}
+	c, err := enterpriseClient(cfg)
+	if err != nil {
+		pm.Err = err
+		return pm
+	}
+	list, err := c.Models(ctx)
+	if err != nil {
+		pm.Err = err
+		return pm
+	}
+	for _, m := range list {
+		lm := ListedModel{ID: m.ID, DisplayName: m.DisplayName, Default: m.Default}
+		if c, ok := m.Caps(); ok {
+			lm.Caps = &c
+		}
+		if m.Price != nil {
+			lm.Price = &config.ModelPrice{InputPerMTok: m.Price.InputPerMTok, OutputPerMTok: m.Price.OutputPerMTok}
+		}
+		pm.Models = append(pm.Models, lm)
+	}
+	sort.Slice(pm.Models, func(i, j int) bool { return pm.Models[i].ID < pm.Models[j].ID })
+	return pm
 }

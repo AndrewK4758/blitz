@@ -32,33 +32,40 @@ import {
   mdiFolderOutline,
   mdiFolderPlusOutline,
   mdiLinkVariant,
+  mdiLoading,
   mdiLockOutline,
   mdiRefresh,
   mdiRenameOutline,
   mdiAt,
   mdiMessagePlusOutline,
   mdiMinusBoxOutline,
+  mdiOpenInNew,
   mdiPlusBoxMultipleOutline,
   mdiPlusBoxOutline,
   mdiSourceBranch,
   mdiSourceCommit,
   mdiTrayArrowDown,
   mdiUndoVariant,
+  mdiWeb,
 } from "@mdi/js";
-import { canCall, canDragOut, droppedPaths, dragOut, fileManager, revealPath, trashDropped } from "../desktop";
-import { addToContext, showHistory } from "../events";
+import { canCall, canDragOut, droppedPaths, dragOut, fileManager, openURL, revealPath, servePage, trashDropped } from "../desktop";
+import { addToContext, openWeb, showHistory } from "../events";
 import { includeAll } from "../includeAll";
 import { files } from "../api";
 import { message } from "../errors";
 import { FileKind, GitAction, type FileEntry } from "../gen/blitz/v1/file_pb";
 import { gitActions, gitKeys, stagedKey } from "./gitMenu";
 import { t, tn } from "../i18n";
-import { Button, ContextMenu, Dialog, Icon, IconButton, useSnackbar, type MenuEntry } from "../ui/controls";
-import { ResizeHandle } from "../ui/ResizeHandle";
+import { Button, ContextMenu, Dialog, Icon, IconButton, useSnackbar, type MenuEntry } from "@blitz/webui";
+import { ResizeHandle } from "@blitz/webui";
 import { fileIcon } from "./icons";
 import { dropEntries, importDrop, readDrop, someNames, type DropItem, type OnConflict } from "./upload";
 import { ancestors, dragType, emptyTree, isFolder, joinPath, moveTarget, parentOf, rows, setExpanded, shownFolders, validName, withChildren, type Tree } from "./tree";
 import { useAdvanced } from "../state";
+import { useOrgBranding } from "../orgBranding";
+
+/** slowOpen is how long opening goes before the list says what it waits for. */
+const slowOpen = 1500;
 
 const gitIcons: Record<GitAction, string> = {
   [GitAction.UNSPECIFIED]: mdiSourceBranch,
@@ -102,7 +109,7 @@ type Incoming = {
 type Naming = { kind: "file" | "folder"; dir: string } | { kind: "rename"; path: string };
 
 /**
- * The Files shelf (spec_files_029 §5): the workspace as a tree, loaded a
+ * The Files shelf (spec_029_files §5): the workspace as a tree, loaded a
  * folder at a time, with git status, the agent's rules, and file
  * operations.
  */
@@ -153,6 +160,19 @@ export function FilesShelf({
   // The workspace is a git repository (from its listing): git actions are offered.
   const [repo, setRepo] = useState(false);
   const [error, setError] = useState("");
+  // Until the workspace has opened (the service opens it on the first
+  // call, its model included), the list says so, and after a moment what
+  // it's waiting for (EN-37): never an empty list that isn't.
+  const [opened, setOpened] = useState(false);
+  const [waiting, setWaiting] = useState<"" | "opening" | "slow">("");
+  const org = useOrgBranding();
+  useEffect(() => {
+    setOpened(false);
+    setWaiting("");
+    // Shown only when opening takes a while, so a quick one doesn't flash.
+    const ids = [window.setTimeout(() => setWaiting("opening"), 300), window.setTimeout(() => setWaiting("slow"), slowOpen)];
+    return () => ids.forEach((id) => window.clearTimeout(id));
+  }, [dir]);
   const list = useRef<HTMLDivElement>(null);
   const treeRef = useRef(tree);
   treeRef.current = tree;
@@ -176,6 +196,8 @@ export function FilesShelf({
     } catch (e) {
       setError(message(e));
       return;
+    } finally {
+      setOpened(true);
     }
     await Promise.all(rest.map((f) => load(f).catch(() => undefined)));
   }, [load]);
@@ -425,6 +447,17 @@ export function FilesShelf({
     const folder = e ? (isFolder(e) ? e.path : parentOf(e.path)) : "";
     const items: MenuEntry[] = [];
     if (e && !isFolder(e)) items.push({ label: t("desktop.files.open"), icon: fileIcon(e.name), onSelect: () => onOpen(e.path) });
+    // A page also opens in a browser, where its scripts run (the preview runs none; EL-102).
+    if (e && !isFolder(e) && /\.html?$/i.test(e.name) && canCall("ServePage")) {
+      const served = (then: (url: string) => unknown) => () =>
+        void servePage(dir, e.path)
+          .then(then)
+          .catch((err: unknown) => snack(message(err), { error: true }));
+      items.push(
+        { label: t("desktop.files.open_in_browser"), icon: mdiWeb, onSelect: served((url) => openWeb({ dir, url })) },
+        { label: t("desktop.files.open_in_system_browser"), icon: mdiOpenInNew, onSelect: served((url) => openURL(url)) },
+      );
+    }
     items.push(
       { label: t("desktop.files.new_file"), icon: mdiFilePlusOutline, onSelect: () => void startNew("file", folder) },
       { label: t("desktop.files.new_folder"), icon: mdiFolderPlusOutline, onSelect: () => void startNew("folder", folder) },
@@ -639,7 +672,13 @@ export function FilesShelf({
             </div>
           );
         })}
-        {shown.length === 0 && !error && !naming && <p className="muted t-body-sm files-note">{t("desktop.files.empty")}</p>}
+        {!opened && !error && waiting && (
+          <p className="muted t-body-sm files-note row" role="status">
+            <Icon path={mdiLoading} size="sm" spin />
+            {waiting === "slow" ? (org?.name ? t("desktop.files.opening_org", { org: org.name }) : t("desktop.files.opening_slow")) : t("desktop.files.opening")}
+          </p>
+        )}
+        {opened && shown.length === 0 && !error && !naming && <p className="muted t-body-sm files-note">{t("desktop.files.empty")}</p>}
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.entry)} onClose={() => setMenu(null)} />}
       {/* At the page's level: the shelf's glass blur would otherwise be the

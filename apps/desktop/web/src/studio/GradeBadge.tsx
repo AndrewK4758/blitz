@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-// Studio's grade badges (spec_health_044 HL-15): each list's items show
+// Studio's grade badges (spec_044_health HL-15): each list's items show
 // the judge's grade, from the dashboard Studio follows.
 
 import { createContext, useContext } from "react";
 import { t } from "../i18n";
-import { gradeTone } from "../ui/charts";
+import { gradeTone } from "@blitz/webui";
 
 /** What the badges show, by item key (kind/name): its grade, and whether a check is judging it now. */
 export interface Grades {

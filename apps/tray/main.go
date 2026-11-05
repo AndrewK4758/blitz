@@ -66,7 +66,7 @@ const every = 2 * time.Second
 const tasksEvery = 10 * time.Second
 
 func main() {
-	socket.Front = activity.Desktop // the page's requests, through this host (spec_active_installs_054 AI-02)
+	socket.Front = activity.Desktop // the page's requests, through this host (spec_054_active_installs AI-02)
 	install := flag.Bool("install", false, "Start the tray at login (and now), then exit")
 	uninstall := flag.Bool("uninstall", false, "Stop starting the tray at login, then exit")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
@@ -307,7 +307,7 @@ func onReady() {
 	systray.SetTitle("")
 	state := systray.AddMenuItem(i18n.T("tray.service"), "")
 	state.Disable()
-	// What's going on (spec_electron_038 EL-111): a heading and an item
+	// What's going on (spec_038_electron EL-111): a heading and an item
 	// per run, each with Show and Stop, shown while there are some.
 	runningHead := systray.AddMenuItem(i18n.T("tray.running"), "")
 	runningHead.Disable()
@@ -320,11 +320,15 @@ func onReady() {
 	// The running service's MCP servers: the service's, not a workspace's.
 	mcpMenu := &submenu{parent: systray.AddMenuItem(i18n.T("tray.mcp"), "")}
 	// The agents' background processes still running, each with Stop
-	// (spec_electron_038 EL-112).
+	// (spec_038_electron EL-112).
 	procMenu := &submenu{parent: systray.AddMenuItem(tray.ProcessesTitle(nil), "")}
+	// The organization's runs waiting for an answer, each with Approve
+	// and Deny (spec_053 EN-43): shown while there are some.
+	approvalsMenu := &submenu{parent: systray.AddMenuItem(tray.ApprovalsTitle(0), "")}
+	approvalsMenu.parent.Hide()
 	systray.AddSeparator()
 	open := systray.AddMenuItem(i18n.T("tray.open_app"), "")
-	// Workflows' human tasks waiting (spec_electron_038 EL-110): shown while there are some.
+	// Workflows' human tasks waiting (spec_038_electron EL-110): shown while there are some.
 	tasksItem := systray.AddMenuItem("", "")
 	tasksItem.Hide()
 	logs := systray.AddMenuItem(i18n.T("tray.open_logs"), "")
@@ -447,6 +451,13 @@ func onReady() {
 				procMenu.parent.SetTitle(title)
 			}
 			procMenu.show(tray.ProcessEntries(extras.Processes, spaces), click)
+			if waiting := tray.FetchApprovals(context.Background(), sock); len(waiting) > 0 {
+				approvalsMenu.parent.SetTitle(tray.ApprovalsTitle(len(waiting)))
+				approvalsMenu.parent.Show()
+				approvalsMenu.show(tray.ApprovalEntries(waiting), click)
+			} else {
+				approvalsMenu.parent.Hide()
+			}
 			going := tray.Going(live, spaces, time.Now())
 			runSlots.show(going, click)
 			if len(going) > 0 {
@@ -470,6 +481,7 @@ func onReady() {
 		} else {
 			mcpMenu.parent.Hide()
 			procMenu.parent.Hide()
+			approvalsMenu.parent.Hide()
 			runningHead.Hide()
 			spacesHead.Hide()
 			runSlots.show(nil, click)

@@ -44,7 +44,7 @@ import { workspaces } from "../api";
 import { message } from "../errors";
 import { t, tn } from "../i18n";
 import { AgentScope, type AgentFile, type EvalCase, type EvalCaseSchema, type EvalFile, type EvalResult, type EvalRun, type RunEvalResponse, type WatchEvalRunResponse } from "../gen/blitz/v1/workspace_pb";
-import { Button, Dialog, Field, Icon, IconButton, Segmented, Switch, Tabs, useSnackbar, MultiSelect } from "../ui/controls";
+import { Button, Dialog, Field, Icon, IconButton, Segmented, Switch, Tabs, useSnackbar, MultiSelect } from "@blitz/webui";
 import { DraftButton } from "./Draft";
 import { agentsToRefine, evalNameFor, evalsForAgent, refineRequest } from "./evalCoverage";
 import { casesFromDraft, duplicateIds, emptyEvalForm, formFromEval, money, resultsCost, seconds, moveCase, newCase, resultsByCase, resultStatuses, runCounts, sameEvalForm, specFromForm, type CaseForm, type EvalForm } from "./evalForm";
@@ -81,7 +81,7 @@ const summary = (run: Pick<EvalRun, "counts" | "results">) => {
 const scoreText = (r: EvalResult) => (r.status === "error" ? "" : r.type === "near" ? `${r.score.toFixed(2)} / ${r.threshold.toFixed(2)}` : t(r.score ? "desktop.evals.matched" : "desktop.evals.no_match"));
 
 /**
- * The workspace's evals (Studio › Evals, spec_evals_042): each listed with
+ * The workspace's evals (Studio › Evals, spec_042_evals): each listed with
  * its last run, and run from the list. An eval's form slides in over the
  * list with three tabs: its cases (each a row that opens into its editor:
  * the prompt, the output expected, exact or near and the threshold, and

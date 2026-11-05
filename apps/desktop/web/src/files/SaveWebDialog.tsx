@@ -22,7 +22,7 @@ import { message } from "../errors";
 import { filesTouched, openFile } from "../events";
 import { FileKind } from "../gen/blitz/v1/file_pb";
 import { t } from "../i18n";
-import { Button, Dialog, Field, Segmented, useSnackbar } from "../ui/controls";
+import { Button, Dialog, Field, Segmented, useSnackbar } from "@blitz/webui";
 import { paperFor } from "./printPage";
 import { pageHTML, pictureLimits, pictureName, picturesFolder, saveName, savePath, type SaveFormat } from "./webSave";
 
@@ -32,7 +32,7 @@ let lastFormat: SaveFormat = "md";
 let lastPictures = true;
 
 /**
- * Save to workspace (spec_electron_038 EL-106): the web page as Markdown,
+ * Save to workspace (spec_038_electron EL-106): the web page as Markdown,
  * HTML or PDF, in a folder of the workspace (made if it isn't there),
  * under a name of the user's; a file that's there is replaced only when
  * the user says. Markdown's pictures are saved beside it (<name>_files),

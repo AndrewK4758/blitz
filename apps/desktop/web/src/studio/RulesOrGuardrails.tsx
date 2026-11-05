@@ -17,14 +17,14 @@
 import { useState, type ReactNode } from "react";
 import { mdiInformationOutline, mdiScaleBalance, mdiShieldLockOutline } from "@mdi/js";
 import { t } from "../i18n";
-import { Button, Icon, IconButton } from "../ui/controls";
+import { Button, Icon, IconButton } from "@blitz/webui";
 
 /** The questions the comparison answers, in order. */
 const aspects = ["for", "when", "sees", "fails", "example"] as const;
 
 /**
  * What tells rules from guardrails, at the top of both Studio pages
- * (spec_gates_041 GT-11): rules check the work against the team's
+ * (spec_041_gates GT-11): rules check the work against the team's
  * expectations at the turn's edges and can send it back; guardrails keep
  * every step safe and within limits, built in or your own, and never ask
  * for a revision. The page shown (current) is marked, and the other is a

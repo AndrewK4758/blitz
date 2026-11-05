@@ -22,14 +22,14 @@ import { Markdown } from "../Markdown";
 import { maxMarkdownCSS } from "../prefs";
 import { useApp } from "../state";
 import type { Theme } from "../theme";
-import { Button, Segmented } from "../ui/controls";
+import { Button, Segmented } from "@blitz/webui";
 import { fileState, languageSupport } from "./codemirror";
 import { docCssTemplate, docCssToSave } from "./docCss";
 
 const key = (theme: Theme) => (theme === "dark" ? "markdown_css_dark" : "markdown_css_light");
 
 /**
- * Settings → Documents (spec_files_029 FIL-57): CSS for Markdown previews,
+ * Settings → Documents (spec_029_files FIL-57): CSS for Markdown previews,
  * one stylesheet per theme over the defaults, and a sample that shows it
  * as it's typed.
  */

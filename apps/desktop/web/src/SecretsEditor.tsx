@@ -21,7 +21,7 @@ import { message } from "./errors";
 import type { Secret } from "./gen/blitz/v1/config_pb";
 import { t } from "./i18n";
 import { forgetSecretNames } from "./secretComplete";
-import { Button, Dialog, Icon, IconButton, useSnackbar } from "./ui/controls";
+import { Button, Dialog, Icon, IconButton, useSnackbar } from "@blitz/webui";
 
 /** Whether key can name a secret: letters, digits, _, . and -, up to 64 (secrets.ValidKey). */
 export const validSecretKey = (key: string) => /^[A-Za-z0-9_.-]{1,64}$/.test(key);
@@ -38,7 +38,7 @@ export const secretPlaceholder = (key: string, workspace = "") => `{secrets:${wo
 export const storedName = (prefix: string, key: string) => `${prefix}${key}`;
 
 /**
- * The user's secrets in a scope (spec_secrets_039): the global ones
+ * The user's secrets in a scope (spec_039_secrets): the global ones
  * (Settings › Library › Secrets, workspace "") or a workspace's own (its settings).
  * Names are listed; a value is only ever written (added, or replaced),
  * kept in the system's keychain, and named as {secrets:key}.

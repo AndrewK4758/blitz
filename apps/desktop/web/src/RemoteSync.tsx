@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// The Changes page and the workspace's remote (spec_desktop_024 DSK-90b):
+// The Changes page and the workspace's remote (spec_024_desktop DSK-90b):
 // Pull and Push with the ahead and behind counts, and a pull's conflicts —
 // the merge or rebase waiting, and each conflicted file.
 
@@ -25,7 +25,7 @@ import { compose, filesTouched, openFile, showView } from "./events";
 import { t, tn } from "./i18n";
 import { ConflictChoice, GitOperation, PullOutcome, type GetGitStatusResponse } from "./gen/blitz/v1/workspace_pb";
 import { branchMerge, inProgress, mergingFrom, pullMessage, remoteErrorText, resolvePrompt, syncTitle } from "./gitRemote";
-import { Button, Dialog, Icon, useSnackbar } from "./ui/controls";
+import { Button, Dialog, Icon, useSnackbar } from "@blitz/webui";
 
 type Props = {
   dir: string;

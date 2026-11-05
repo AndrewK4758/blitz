@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package mcpauth signs Blitz in to MCP servers over HTTP with OAuth
-// (spec_parity_027 PAR-MCP-04): the authorization-code flow with PKCE,
+// (spec_027_parity PAR-MCP-04): the authorization-code flow with PKCE,
 // through a local callback or a code pasted over SSH, with the client
 // registered dynamically. The tokens and what refreshing them needs are
 // kept in the secret store (the OS keychain, else an owner-only file),
@@ -35,6 +35,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 	"github.com/retail-cortex/blitz/pkg/secrets"
+	"github.com/retail-cortex/blitz/pkg/signedin"
 	"golang.org/x/oauth2"
 )
 
@@ -178,10 +179,12 @@ func Login(ctx context.Context, store secrets.Store, server, serverURL string, s
 		}
 		res := resultFrom(r.URL.Query())
 		if res == nil {
-			http.Error(w, "The sign-in didn't return a code.", http.StatusBadRequest)
+			signedin.Write(w, http.StatusBadRequest, signedin.Page{Title: "The sign-in didn't go through", Failed: true,
+				Message: "The server sent no code back. Try blitz mcp login " + server + " again."})
 			return
 		}
-		fmt.Fprintln(w, "Signed in to Blitz. You can close this page.")
+		signedin.Write(w, http.StatusOK, signedin.Page{Title: "You're signed in",
+			Message: "Blitz is signed in to " + server + ". Go back to your terminal; you can close this page."})
 		select {
 		case results <- res:
 		default:

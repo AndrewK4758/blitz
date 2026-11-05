@@ -20,7 +20,7 @@ import { workers } from "../api";
 import { message, reason } from "../errors";
 import { WorkerState, type Worker } from "../gen/blitz/v1/worker_pb";
 import { t } from "../i18n";
-import { Button, Dialog, Field, Icon, IconButton, Switch, useSnackbar } from "../ui/controls";
+import { Button, Dialog, Field, Icon, IconButton, Switch, useSnackbar } from "@blitz/webui";
 import { createPortal } from "react-dom";
 
 /** A new schedule's worker's name: the workflow's, then -2, -3, … past those taken. */
@@ -37,7 +37,7 @@ const next = (w: Worker) => (w.nextRun ? new Date(Number(w.nextRun.seconds) * 10
 type Draft = { name: string; schedule: string; input: string };
 
 /**
- * When a workflow runs by itself (spec_workflows_043 WF-20): its schedules,
+ * When a workflow runs by itself (spec_043_workflows WF-20): its schedules,
  * each a worker that runs it (a deterministic worker: the workflow's steps,
  * its prompt the workflow's input), added, changed, switched on and off
  * and removed here. What a worker may do and its limits are in Studio ›

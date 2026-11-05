@@ -28,7 +28,7 @@ import (
 	"github.com/retail-cortex/blitz/pkg/engine/connectors"
 )
 
-// A connection's paths (spec_databases_046 DB-16): a setting its kind
+// A connection's paths (spec_046_databases DB-16): a setting its kind
 // marks as a path (SQLite's database) is written as the person wrote it,
 // so a committed file means the same on every machine, and resolved only
 // when Blitz connects: a relative one against the workspace's folder (a
@@ -68,9 +68,10 @@ func homeDir() string {
 }
 
 // scopeBase is the folder a connection's relative paths start from, by
-// its scope: the workspace's, or the home folder.
+// its scope: the workspace's, or the home folder (a global one's and the
+// organization's).
 func scopeBase(scope, workspace string) string {
-	if scope != connectors.ScopeGlobal && workspace != "" {
+	if (scope == "" || scope == connectors.ScopeWorkspace) && workspace != "" { // "" is a new one, the workspace's
 		return workspace
 	}
 	return homeDir()

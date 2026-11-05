@@ -14,17 +14,18 @@
  * limitations under the License.
  */
 
+import { OrgUsageCard } from "./OrgUsage";
 import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { mdiAlertCircleOutline, mdiCheckCircleOutline, mdiLoading, mdiMinusCircleOutline, mdiLockOutline, mdiOpenInNew } from "@mdi/js";
 import { config } from "./api";
 import { openURL } from "./desktop";
 import { message } from "./errors";
 import { configChanged, configChangedEvent } from "./events";
-import { KeySource, type ConfigChange, type DescribeConfigResponse, type ProviderConfig, type SignInStatus } from "./gen/blitz/v1/config_pb";
-import { t, tn } from "./i18n";
+import { KeySource, type ConfigChange, type DescribeConfigResponse, type EnterpriseState, type ListedModel, type ProviderConfig, type SignInStatus } from "./gen/blitz/v1/config_pb";
+import { language, t, tn } from "./i18n";
 import { checkModelRef } from "./models";
 import { ModelInput, refreshModelCatalog, useModelCatalog } from "./ModelInput";
-import { Button, Chip, Icon, Segmented, useSnackbar } from "./ui/controls";
+import { Button, Chip, Icon, Segmented, useSnackbar } from "@blitz/webui";
 import { keyPages, listedProviders, noProviderReady, providerState, type OllamaProbe, type ProviderFacts, type ProviderState } from "./providerStatus";
 import { useAdvanced } from "./state";
 import { showsSignIn } from "./simpleMode";
@@ -199,6 +200,16 @@ export function ProviderSettings({ workspace, compact }: { workspace: string; co
   const catalog = useModelCatalog(workspace, choice.provider);
   const [facts, refreshFacts] = useProviderFacts(workspace, desc);
   const keyCheck = useKeyCheck(workspace, choice.provider, choice.method, choice.key);
+  // Connected to an organization, its models are the models (spec_053
+  // EN-20): the page offers its models, and the person's own providers
+  // wait, kept, until they disconnect.
+  const [org, setOrg] = useState<EnterpriseState | null>(null);
+  useEffect(() => {
+    config.getEnterprise({ check: false }).then(
+      (r) => setOrg(r.state ?? null),
+      () => setOrg(null),
+    );
+  }, [workspace]);
 
   // Reads the scope; fresh also starts the choice over from what's saved.
   const load = useCallback(
@@ -241,6 +252,7 @@ export function ProviderSettings({ workspace, compact }: { workspace: string; co
   };
 
   if (!desc) return <p className="muted">{error || t("desktop.checking")}</p>;
+  if (org?.url) return <OrganizationModels workspace={workspace} org={org} desc={desc} onSaved={() => void load()} />;
   const keyed = desc.providers.find((p) => p.name === choice.provider);
   const others = authMethods[choice.provider] ?? [];
   const saved = savedChoice(desc, effectiveProvider(desc.provider, workspace));
@@ -502,6 +514,93 @@ function ProviderRow({
   );
 }
 
+/**
+ * The organization's models, while Blitz is connected to its service: the
+ * organization as the one provider, and its models to choose the default
+ * from ("" for the organization's own default).
+ */
+function OrganizationModels({ workspace, org, desc, onSaved }: { workspace: string; org: EnterpriseState; desc: DescribeConfigResponse; onSaved: () => void }) {
+  const snack = useSnackbar();
+  const [models, setModels] = useState<ListedModel[] | null>(null);
+  const [listError, setListError] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    config.listModels({ workspace, providers: ["enterprise"] }).then(
+      (r) => {
+        const p = r.providers.find((x) => x.provider === "enterprise");
+        setModels(p?.models ?? []);
+        setListError(p?.error ?? "");
+      },
+      (e) => setListError(message(e)),
+    );
+  }, [workspace, org.signedIn]);
+  const name = org.name || org.url;
+  const current = desc.defaultModel.startsWith("enterprise/") ? desc.defaultModel.slice("enterprise/".length) : "";
+  const choose = async (id: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      const { change } = await config.setConfigValue({ workspace, key: "blitz.default_model", value: id ? `enterprise/${id}` : "" });
+      if (change?.modelError) setError(change.modelError);
+      else snack(t("desktop.keys.provider_saved"));
+      configChanged({ dir: workspace });
+      onSaved();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="stack provider-settings" style={{ gap: 12 }}>
+      <p className="t-body-sm muted">
+        <Icon path={mdiLockOutline} size="sm" /> {t("desktop.org.models_intro", { org: name })}
+      </p>
+      <div className="list provider-list" role="radiogroup" aria-label={t("desktop.keys.provider")}>
+        <ProviderRow
+          name={name}
+          state={org.signedIn ? { key: "org_signed_in", params: { email: org.email }, tone: "ok", ready: true } : { key: "org_signed_out", tone: "warn", ready: false }}
+          selected
+          inUse
+          busy={busy}
+          onSelect={() => {}}
+          onUse={() => {}}
+        />
+      </div>
+      <section className="card provider-choice">
+        <span className="t-title-sm">{name}</span>
+        <label className="field single">
+          <span className="t-label">{t("desktop.keys.default_model")}</span>
+          <select className="select" value={current} disabled={busy || !org.signedIn || models === null} onChange={(e) => void choose(e.target.value)}>
+            <option value="">{t("desktop.org.model_default")}</option>
+            {current && !models?.some((m) => m.id === current) && <option value={current}>{current}</option>}
+            {models?.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.isDefault ? t("desktop.org.model_is_default", { name: m.displayName || m.id }) : m.displayName || m.id}
+              </option>
+            ))}
+          </select>
+        </label>
+        {(() => {
+          const m = models?.find((x) => (current ? x.id === current : x.isDefault));
+          const facts = m ? modelFacts(m) : "";
+          return facts ? <p className="t-body-sm muted org-model-facts">{facts}</p> : null;
+        })()}
+        {!org.signedIn ? (
+          <p className="t-body-sm muted">{t("desktop.org.models_sign_in")}</p>
+        ) : listError ? (
+          <p className="error-text t-body-sm">{listError}</p>
+        ) : models?.length === 0 ? (
+          <p className="t-body-sm muted">{t("desktop.org.no_models")}</p>
+        ) : null}
+        {error && <p className="error-text t-body-sm">{error}</p>}
+      </section>
+      {org.signedIn && <OrgUsageCard />}
+    </div>
+  );
+}
+
 /** Whether the key being typed works, once it's been tried. */
 function KeyCheckLine({ check }: { check: KeyCheck }) {
   if (check.busy) return <span className="supporting t-body-sm muted">{t("desktop.keys.check.busy")}</span>;
@@ -573,4 +672,19 @@ export function ConnectModelCard({ onSetUp }: { onSetUp: () => void }) {
       </Button>
     </div>
   );
+}
+
+/**
+ * What the organization says one of its models can do, and its price
+ * (spec_053 EN-21): "Uses tools · Reads images · 200K context · …".
+ */
+export function modelFacts(m: ListedModel): string {
+  const c = m.capabilities;
+  const parts: string[] = [];
+  if (c?.tools) parts.push(t("desktop.org.can.tools"));
+  if (c?.images) parts.push(t("desktop.org.can.images"));
+  if (c?.thinking) parts.push(t("desktop.org.can.thinking"));
+  if (c?.context) parts.push(t("desktop.org.can.context", { k: Math.round(c.context / 1000).toLocaleString(language()) }));
+  if (m.hasPrice) parts.push(t("desktop.org.model_price", { input: m.inputPerMtok.toFixed(2), output: m.outputPerMtok.toFixed(2) }));
+  return parts.join(" · ");
 }

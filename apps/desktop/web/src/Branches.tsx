@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// The Changes page and the workspace's branches (spec_desktop_024 DSK-90c):
+// The Changes page and the workspace's branches (spec_024_desktop DSK-90c):
 // switch to one, create one, or merge one into the current branch. A
 // merge that stops on conflicts waits in MergeBanner, as a pull's does.
 
@@ -25,7 +25,7 @@ import { filesTouched } from "./events";
 import { t } from "./i18n";
 import { PullOutcome, type Branch, type GetGitStatusResponse } from "./gen/blitz/v1/workspace_pb";
 import { inProgress, mergeMessage, remoteErrorText } from "./gitRemote";
-import { Button, Dialog, Field, Icon, Menu, useSnackbar, type MenuEntry } from "./ui/controls";
+import { Button, Dialog, Field, Icon, Menu, useSnackbar, type MenuEntry } from "@blitz/webui";
 
 type Props = {
   dir: string;

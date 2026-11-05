@@ -26,10 +26,12 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/retail-cortex/blitz/apps/service/internal/daemon"
 	"github.com/retail-cortex/blitz/apps/service/internal/doctor"
+	"github.com/retail-cortex/blitz/pkg/client"
+	"github.com/retail-cortex/blitz/pkg/gitcred"
 	"github.com/retail-cortex/blitz/pkg/legal"
 	"github.com/retail-cortex/blitz/pkg/pdftext"
+	"github.com/retail-cortex/blitz/pkg/service"
 	"github.com/retail-cortex/blitz/pkg/socket"
 	"github.com/spf13/cobra"
 )
@@ -52,7 +54,7 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) int {
-	var o daemon.Options
+	var o service.Options
 	var license string
 	cmd := &cobra.Command{
 		Use:   "blitzd",
@@ -78,7 +80,7 @@ every login.`,
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()
 			o.Version = version
-			return daemon.Run(ctx, o)
+			return service.Run(ctx, o)
 		},
 	}
 	cmd.Flags().StringVar(&o.Socket, "socket", "", "Unix socket to listen on (default ~/.blitz/run/blitz.sock, or $BLITZ_SOCKET)")
@@ -115,7 +117,7 @@ every login.`,
 	cmd.Flags().StringVar(&license, "license", "", "show the license and exit: the NOTICE, or =full (the Apache License) or =third-party (the notices of the software blitzd includes)")
 	cmd.Flags().Lookup("license").NoOptDefVal = "notice"
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return fmt.Errorf("%w: %v", errUsage, err) })
-	cmd.AddCommand(newDoctorCommand())
+	cmd.AddCommand(newDoctorCommand(), newGitCredentialCommand(), newRunJobCommand())
 	cmd.SetArgs(args)
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		if errors.Is(err, errChecksFailed) {
@@ -185,3 +187,48 @@ func showLicense(cmd *cobra.Command, which string) error {
 
 // errUsage marks a bad flag or argument.
 var errUsage = errors.New("usage")
+
+// newGitCredentialCommand is blitzd git-credential: Git's credential helper
+// for the organization's service (spec_053_enterprise EN-61), set in each
+// organization clone's own Git settings. It asks the running service for
+// the access token, which only the service renews; with no service
+// running, it answers nothing.
+// newRunJobCommand is blitzd run-job: one run of a job the organization's
+// service runs (spec_009_jobs JB-10), in the runner the service starts,
+// which describes the run in its environment.
+func newRunJobCommand() *cobra.Command {
+	var configDir string
+	cmd := &cobra.Command{
+		Use:    "run-job",
+		Short:  "Run one run of a job for your organization's Blitz service",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			j, err := service.JobFromEnv(os.Getenv)
+			if err != nil {
+				return fmt.Errorf("%w: %v", errUsage, err)
+			}
+			return service.RunJob(cmd.Context(), j, service.JobOptions{Config: configDir, Client: "blitzd " + version + " (job)"})
+		},
+	}
+	cmd.Flags().StringVar(&configDir, "config", "", "configuration file (default: the usual search)")
+	return cmd
+}
+
+func newGitCredentialCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:    "git-credential <get|store|erase>",
+		Short:  "Git's credential helper for your organization's Blitz service",
+		Hidden: true,
+		Args:   cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return gitcred.Run(cmd.Context(), args[0], cmd.InOrStdin(), cmd.OutOrStdout(), func(ctx context.Context, host string) (string, string, bool, error) {
+				sock := socket.DefaultSocket()
+				if !socket.Running(sock) {
+					return "", "", false, nil
+				}
+				return client.AttachSettings(sock).GitCredential(ctx, host)
+			})
+		},
+	}
+}

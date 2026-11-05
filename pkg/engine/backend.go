@@ -75,7 +75,7 @@ func (w *Workspace) RunningProcesses() []api.ProcessInfo {
 }
 
 // AnyProcessOutput is background process id's captured output and status,
-// whichever session started it: the user's own look (spec_processes_052).
+// whichever session started it: the user's own look (spec_052_processes).
 func (w *Workspace) AnyProcessOutput(id int) (string, api.ProcessInfo, error) {
 	if _, err := w.tools.Processes().SessionOf(id); err != nil {
 		return "", api.ProcessInfo{}, fmt.Errorf("%w: %d", api.ErrUnknownProcess, id)
@@ -126,6 +126,9 @@ func (w *Workspace) RunUserShell(ctx context.Context, command string, out func([
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return 0, false, errors.New("no command after the exclamation mark")
+	}
+	if o := w.settings().Org; o.Active() && !o.Policy.Tools.ShellCommands {
+		return 0, false, errors.New("your organization doesn't allow your own ! commands")
 	}
 	cmd := tools.UserCommand(ctx, w.Dir(), command)
 	sink := &cappedWriter{out: out, left: MaxUserShellOutput}

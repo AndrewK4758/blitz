@@ -3,7 +3,7 @@ title: The service API
 weight: 20
 ---
 
-Specs: [service](../about/specs/spec_service_021.md), [client](../about/specs/spec_client_022.md).
+Specs: [service](../about/specs/spec_021_service.md), [client](../about/specs/spec_022_client.md).
 
 ## The protos
 
@@ -23,7 +23,7 @@ The generated code is never committed. Bazel generates one Go package (`blitzv1`
 
 ## Handlers translate, nothing more
 
-`apps/service/internal/server` maps each RPC to a `Workspace` operation and back. It holds no logic of its own. Errors cross as Connect errors carrying an `ErrorInfo{reason, metadata}` detail (`WORKSPACE_BUSY`, `PROMPT_BLOCKED`, `COST_LIMIT`, …), which `pkg/client` maps back to the same typed errors `pkg/api` defines, so `errors.Is` works on either side of the socket.
+`pkg/service/server` maps each RPC to a `Workspace` operation and back. It holds no logic of its own. Errors cross as Connect errors carrying an `ErrorInfo{reason, metadata}` detail (`WORKSPACE_BUSY`, `PROMPT_BLOCKED`, `COST_LIMIT`, …), which `pkg/client` maps back to the same typed errors `pkg/api` defines, so `errors.Is` works on either side of the socket.
 
 ## Workspaces by path
 

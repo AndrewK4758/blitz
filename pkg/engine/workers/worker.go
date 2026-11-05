@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/retail-cortex/blitz/pkg/api"
+	"github.com/retail-cortex/blitz/pkg/jobspec"
 
 	"gopkg.in/yaml.v3"
 )
@@ -54,6 +55,9 @@ type frontmatter struct {
 	Limits      api.Limits `yaml:"limits"`
 	Overlap     string     `yaml:"overlap"`
 	CatchUp     string     `yaml:"catch_up"`
+	RunsOn      string     `yaml:"runs_on"`
+	OnRequest   string     `yaml:"on_request"`
+	Merge       string     `yaml:"merge"`
 }
 
 // Worker is a worker as read from its directory.
@@ -76,9 +80,18 @@ type Worker struct {
 	// CatchUp is "none" or "once" (run once for runs missed while the
 	// service wasn't running).
 	CatchUp string
+	// RunsOn is where it runs: jobspec.Here, or jobspec.Service (the
+	// organization's service runs it; this computer doesn't, EN-40).
+	RunsOn string
+	// OnRequest is "refuse" or "pause" ("" for where it runs's default,
+	// EN-43).
+	OnRequest string
+	// Merge is jobspec.MergeMain or jobspec.MergeNever: where a run on the
+	// service leaves its changes.
+	Merge string
 	// Prompt is the workflow: WORKER.md's body.
 	Prompt string
-	// Flow is a workflow (spec_workflows_043 WF-17) the worker runs, its
+	// Flow is a workflow (spec_043_workflows WF-17) the worker runs, its
 	// prompt the workflow's input.
 	Flow string
 }
@@ -150,6 +163,17 @@ func Load(dir string) (*Worker, error) {
 	default:
 		problems = append(problems, fmt.Sprintf("overlap %q: only \"skip\" is supported", w.Overlap))
 	}
+	if w.RunsOn, err = jobspec.RunsOn(f.RunsOn); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if w.Merge, err = jobspec.MergeOf(f.Merge); err != nil {
+		problems = append(problems, err.Error())
+	}
+	switch w.OnRequest = f.OnRequest; w.OnRequest {
+	case "", "refuse", "pause":
+	default:
+		problems = append(problems, fmt.Sprintf("on_request %q: use \"refuse\" or \"pause\"", w.OnRequest))
+	}
 	switch w.CatchUp {
 	case "":
 		w.CatchUp = "none"
@@ -199,6 +223,7 @@ func ParseSpec(name string, data []byte) api.WorkerSpec {
 	}
 	spec.Description, spec.Schedule, spec.Timezone = f.Description, f.Schedule, f.Timezone
 	spec.Agent, spec.Model, spec.Permissions, spec.CatchUp, spec.Workflow = f.Agent, f.Model, f.Permissions, f.CatchUp, f.Workflow
+	spec.RunsOn, spec.OnRequest, spec.Merge = f.RunsOn, f.OnRequest, f.Merge
 	spec.Limits = api.Limits{MaxTurns: f.Limits.MaxTurns, MaxCostUSD: f.Limits.MaxCostUSD, TimeoutRaw: f.Limits.TimeoutRaw}
 	spec.Prompt = strings.TrimSpace(string(body))
 	return spec
@@ -219,6 +244,9 @@ type fileFrontmatter struct {
 	Permissions []string    `yaml:"permissions,omitempty"`
 	Limits      *fileLimits `yaml:"limits,omitempty"`
 	CatchUp     string      `yaml:"catch_up,omitempty"`
+	RunsOn      string      `yaml:"runs_on,omitempty"`
+	OnRequest   string      `yaml:"on_request,omitempty"`
+	Merge       string      `yaml:"merge,omitempty"`
 }
 
 type fileLimits struct {
@@ -233,7 +261,8 @@ func Render(s api.WorkerSpec) []byte {
 	fm := fileFrontmatter{
 		Name: s.Name, Description: strings.TrimSpace(s.Description), Schedule: strings.TrimSpace(s.Schedule),
 		Timezone: strings.TrimSpace(s.Timezone), Agent: strings.TrimSpace(s.Agent), Model: strings.TrimSpace(s.Model),
-		Workflow: strings.TrimSpace(s.Workflow), CatchUp: s.CatchUp,
+		Workflow: strings.TrimSpace(s.Workflow), CatchUp: s.CatchUp, RunsOn: s.RunsOn, OnRequest: s.OnRequest,
+		Merge: s.Merge,
 	}
 	for _, p := range s.Permissions {
 		if p = strings.TrimSpace(p); p != "" {
@@ -270,25 +299,8 @@ func (e *InvalidError) Error() string {
 // error a client gets back from the service.
 func (e *InvalidError) Is(target error) bool { return target == api.ErrWorkerInvalid }
 
-// split separates the frontmatter between "---" lines from the body.
-func split(data []byte) (fm, body []byte, err error) {
-	s := bytes.TrimLeft(bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF}), " \t\r\n") // a byte-order mark, then blank lines
-	if !bytes.HasPrefix(s, []byte("---")) {
-		return nil, nil, errors.New("missing frontmatter: start with a line of ---")
-	}
-	s = s[3:]
-	end := bytes.Index(s, []byte("\n---"))
-	if end < 0 {
-		return nil, nil, errors.New("missing the --- line that ends the frontmatter")
-	}
-	body = s[end+4:]
-	if i := bytes.IndexByte(body, '\n'); i >= 0 {
-		body = body[i+1:]
-	} else {
-		body = nil
-	}
-	return s[:end], body, nil
-}
+// split is WORKER.md's frontmatter and body.
+func split(data []byte) (fm, body []byte, err error) { return jobspec.Split(data) }
 
 // maxHashedBytes bounds how much of a worker's directory is hashed.
 const maxHashedBytes = 64 << 20

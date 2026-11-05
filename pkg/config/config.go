@@ -18,7 +18,7 @@
 // the OS keychain, and environment variables applied last. Nothing is
 // read from the workspace itself, so a cloned repository can't redirect
 // a key or turn off approvals. It also edits the file in place, a line at
-// a time, for the settings the front ends change (spec_config_002).
+// a time, for the settings the front ends change (spec_002_config).
 package config
 
 import (
@@ -61,7 +61,7 @@ type Config struct {
 	Git   GitConfig   `toml:"git"`
 	Tools ToolsConfig `toml:"tools"`
 	// Processes say when an agent's background process looks bad
-	// (spec_processes_052).
+	// (spec_052_processes).
 	Processes ProcessesConfig `toml:"processes"`
 	Session   SessionConfig   `toml:"session"`
 	Sandbox   SandboxConfig   `toml:"sandbox"`
@@ -95,8 +95,15 @@ type Config struct {
 	Log               LogConfig       `toml:"log"`
 	Telemetry         TelemetryConfig `toml:"telemetry"`
 	// Usage is whether Blitz counts its install as active, once a day it's
-	// used (spec_active_installs_054).
+	// used (spec_054_active_installs).
 	Usage UsageConfig `toml:"usage"`
+	// Enterprise is the organization's Blitz service this computer
+	// connects to (spec_053_enterprise EN-10). Only the global settings
+	// set it: a workspace's can't.
+	Enterprise EnterpriseConfig `toml:"enterprise"`
+	// Org is the organization's catalog on this computer, set as the
+	// settings load (never read from a file).
+	Org OrgLayer `toml:"-"`
 	// Pricing overrides or adds model prices, keyed by model name, for
 	// /cost and cost limits.
 	Pricing map[string]ModelPrice `toml:"pricing"`
@@ -596,6 +603,15 @@ type ToolsConfig struct {
 	// WorkspaceDir is the workspace: the directory the tools work in (the
 	// --dir flag, else the current directory).
 	WorkspaceDir string `toml:"workspace_dir"`
+	// ReadOnly, set by the service (never a setting), makes the workspace
+	// read-only for the tools and the editor, saying why: a Viewer's clone
+	// of an organization workspace (spec_053 EN-60).
+	ReadOnly string `toml:"-"`
+	// OrgWorkspace, set by the service (never a setting), is the
+	// organization's ID for the workspace when it's one of its workspaces:
+	// each model call carries it, so the service applies the workspace's
+	// guardrails and limits (spec_053 EN-22).
+	OrgWorkspace string `toml:"-"`
 	// AutoApproveCommands runs shell commands without asking (the sandbox and
 	// deny rules still apply).
 	AutoApproveCommands bool `toml:"auto_approve_commands"`
@@ -622,7 +638,7 @@ type ToolsConfig struct {
 }
 
 // ProcessesConfig says when an agent's background process looks bad: the
-// processes view, /processes and the tray flag it (spec_processes_052).
+// processes view, /processes and the tray flag it (spec_052_processes).
 // Durations are Go durations ("2m"); unset or 0 keeps the default.
 type ProcessesConfig struct {
 	// CPUPercent of one core, kept up for BusyFor, flags it as busy
@@ -965,6 +981,11 @@ func load(prefixDir, workspace string) (*Config, error) {
 			cfg.Project.ApplyTightening(cfg)
 		}
 	}
+	// Device management's machine-wide settings over the person's (EN-10),
+	// then the organization's last: its locked items and policy apply over
+	// the workspace's and the person's.
+	applyManaged(cfg)
+	applyOrg(cfg, prefixDir)
 	return cfg, nil
 }
 
@@ -1004,9 +1025,9 @@ func IsWorkspaceRelative(p string) bool {
 // SkillSearchPaths returns skill directories to scan, expanded, with
 // workspace-relative entries resolved against workspace (the working
 // directory if ""). A project's skills load as prompt text; their scripts
-// run only once the project is trusted (spec_project_config_031).
+// run only once the project is trusted (spec_031_project_config).
 func (c *Config) SkillSearchPaths(workspace string) []string {
-	return resolvePaths(c.Skills.Paths, workspace)
+	return c.Org.around("skills", resolvePaths(c.Skills.Paths, workspace))
 }
 
 // UserAgentsDir holds the user's own agents, for every workspace.
@@ -1025,7 +1046,7 @@ const ProjectScriptsDir = ".agents/scripts"
 // AgentSearchPaths returns directories to scan for user-defined agents,
 // resolved like SkillSearchPaths: the user's, then the workspace's.
 func (c *Config) AgentSearchPaths(workspace string) []string {
-	return resolvePaths([]string{UserAgentsDir, ProjectAgentsDir}, workspace)
+	return c.Org.around("agents", resolvePaths([]string{UserAgentsDir, ProjectAgentsDir}, workspace))
 }
 
 func resolvePaths(paths []string, workspace string) []string {

@@ -29,7 +29,7 @@ option go_package = "github.com/retail-cortex/blitz/proto/blitz/v1;blitzv1";
 // Every request names its scope: workspace is an absolute directory, or ""
 // for the global settings.
 service ConfigService {
-  // The browser profiles (spec_browser_profiles_049): each with the sites
+  // The browser profiles (spec_049_browser_profiles): each with the sites
   // the agents browse with it without asking, and the one the workspace
   // named browses with (none: a throwaway profile each time).
   rpc ListBrowserProfiles(ListBrowserProfilesRequest) returns (ListBrowserProfilesResponse);
@@ -112,7 +112,7 @@ service ConfigService {
   // desktop app's System language follows them.
   rpc GetInterfaceLanguage(GetInterfaceLanguageRequest) returns (GetInterfaceLanguageResponse);
   // The skill registries the user added, and the skills installed from
-  // them (spec_skills_013 SK-90..SK-96).
+  // them (spec_013_skills SK-90..SK-96).
   rpc ListSkillRegistries(ListSkillRegistriesRequest) returns (ListSkillRegistriesResponse);
   // Checks a registry's index and remembers it, its token in the keychain
   // (REGISTRY_FAILED when the index can't be read).
@@ -143,7 +143,7 @@ service ConfigService {
   // Records that the user reviewed and trusted the scripts of the skill
   // in a folder, with the content hash they were shown (HASH_MISMATCH if
   // it changed since): its scripts then run without asking first, until
-  // its content changes (spec_skills_013 SK-108).
+  // its content changes (spec_013_skills SK-108).
   rpc TrustSkillScripts(TrustSkillScriptsRequest) returns (TrustSkillScriptsResponse);
   // Returns what a skill's scripts are, for review, when they need it
   // (nothing when they don't).
@@ -165,7 +165,7 @@ service ConfigService {
   // workspace (NOT_FOUND; ALREADY_EXISTS when a global one has its name).
   rpc MakeMCPServerGlobal(MakeMCPServerGlobalRequest) returns (MakeMCPServerGlobalResponse);
 
-  // Returns the global connectors (spec_connectors_047 CON-18): the
+  // Returns the global connectors (spec_047_connectors CON-18): the
   // categories and kinds of the built-in and global descriptors, and the
   // global connections. A workspace's Studio lists them but never
   // changes them.
@@ -187,6 +187,127 @@ service ConfigService {
   // Drafts one of a global connection's queries from what the user is
   // looking for, with the built-in sql-query skill. Nothing is saved.
   rpc DraftGlobalConnectorQuery(DraftGlobalConnectorQueryRequest) returns (DraftGlobalConnectorQueryResponse);
+
+  // The organization's service this computer connects to, and who is
+  // signed in to it (spec_053_enterprise EN-10 to EN-14); with check, it
+  // asks the service too, to say whether it's reached.
+  rpc GetEnterprise(GetEnterpriseRequest) returns (GetEnterpriseResponse);
+  // Connects to the organization's service at an address, after checking
+  // it's one, or disconnects with "", signing out first (INVALID_ADDRESS,
+  // UNREACHABLE).
+  rpc ConnectEnterprise(ConnectEnterpriseRequest) returns (ConnectEnterpriseResponse);
+  // Signs in to the organization's service with its identity provider:
+  // through a browser on this computer, or with a code entered in one
+  // anywhere (device). Streams the address to open, and the code, then
+  // the state once signed in (NOT_CONNECTED, SIGN_IN_FAILED).
+  rpc EnterpriseSignIn(EnterpriseSignInRequest) returns (stream EnterpriseSignInResponse);
+  // Signs out of the organization's service, here and there.
+  rpc EnterpriseSignOut(EnterpriseSignOutRequest) returns (EnterpriseSignOutResponse);
+  // How the organization's Blitz looks (spec_053_enterprise EN-50 to
+  // EN-54): the copy kept on this computer, checked against the service's
+  // signature, or with refresh asked of the service first (no sign-in
+  // needed). Empty when there's none: Blitz's own look.
+  rpc GetBranding(GetBrandingRequest) returns (GetBrandingResponse);
+  // The organization's terms in force and whether they're accepted
+  // (EN-53; NOT_CONNECTED).
+  rpc GetTerms(GetTermsRequest) returns (GetTermsResponse);
+  // Records that the person accepted a version of the terms (CONFLICT when
+  // it isn't the one in force).
+  rpc AcceptTerms(AcceptTermsRequest) returns (AcceptTermsResponse);
+  // The organization's workspaces the person has a role in, and where each
+  // is cloned on this computer (EN-60; NOT_CONNECTED, NOT_SIGNED_IN).
+  rpc ListOrgWorkspaces(ListOrgWorkspacesRequest) returns (ListOrgWorkspacesResponse);
+  // Makes a workspace of the organization's, the person its owner.
+  rpc CreateOrgWorkspace(CreateOrgWorkspaceRequest) returns (CreateOrgWorkspaceResponse);
+  // Clones an organization workspace through its service the first time
+  // (with Blitz's credential helper in the clone's own Git settings), and
+  // answers its folder to open (CLONE_FAILED).
+  rpc OpenOrgWorkspace(OpenOrgWorkspaceRequest) returns (OpenOrgWorkspaceResponse);
+  // Git's credential for a host (EN-61): the access token, renewed when
+  // due, for the organization's service; nothing for another host or when
+  // signed out.
+  rpc GitCredential(GitCredentialRequest) returns (GitCredentialResponse);
+  // An organization workspace's sync on this computer (EN-64): its state
+  // (saved, saving, offline, signed_out, conflicts, refused; "" when it
+  // isn't one kept in step), why it failed, and the files with both
+  // versions kept.
+  rpc GetOrgSync(GetOrgSyncRequest) returns (GetOrgSyncResponse);
+  // Saves an organization workspace's changes and sends what waits at
+  // once (EN-64): Save now, rather than after the quiet spell or the next
+  // minute's try; the sync's state after (NOT_SYNCED when no sync keeps it
+  // in step, GIT_BUSY while a turn runs in it).
+  rpc SaveOrgSync(SaveOrgSyncRequest) returns (SaveOrgSyncResponse);
+  // Adds a service run's changes, on its own branch, to its workspace's
+  // main (blitz-enterprise JB-10), then brings main into the folder at
+  // workspace: Add to my workspace. CONFLICTS when they change the same
+  // lines as main; NO_CHANGES for a run that left none.
+  rpc TakeServiceRun(TakeServiceRunRequest) returns (TakeServiceRunResponse);
+  // A job in an organization workspace as the organization's service runs
+  // it (EN-42; NOT_CONNECTED, NOT_SIGNED_IN, NOT_ORG_WORKSPACE): found is
+  // false until the service has read it from main.
+  rpc GetServiceJob(GetServiceJobRequest) returns (GetServiceJobResponse);
+  // Commits a job's folder and pushes the workspace to its main on the
+  // service, then has the service read it (for a workspace not kept in
+  // step; PUSH_FAILED with Git's reason, NOT_ORG_WORKSPACE).
+  rpc PushServiceJob(PushServiceJobRequest) returns (PushServiceJobResponse);
+  // Starts a run of a service job now (a Runner of its workspace).
+  rpc RunServiceJob(RunServiceJobRequest) returns (RunServiceJobResponse);
+  // Switches a service job on or off (an Editor of its workspace).
+  rpc SetServiceJobEnabled(SetServiceJobEnabledRequest) returns (SetServiceJobEnabledResponse);
+  // The files a service job's run left (spec_055_urns): its out/ folder's
+  // and its log.
+  rpc ListServiceRunFiles(ListServiceRunFilesRequest) returns (ListServiceRunFilesResponse);
+  // Saves one of a run's files in the Downloads folder, answering where.
+  rpc SaveServiceRunFile(SaveServiceRunFileRequest) returns (SaveServiceRunFileResponse);
+  // The runs going now on the organization's service in the person's
+  // workspaces, first as they are, then again with each run's change as it
+  // comes (EN-42: the Processes view, and Studio's service jobs).
+  rpc WatchServiceRuns(WatchServiceRunsRequest) returns (stream WatchServiceRunsResponse);
+  // Shares a folder on this computer with the organization where it is
+  // (EN-66): makes the workspace (a team's, or the person's own), checks
+  // that the folder and its history hold no secrets (FAILED_PRECONDITION
+  // SECRETS_FOUND, naming them), pushes it, and keeps it in step there.
+  // ALREADY_SHARED for a folder that's the organization's already.
+  rpc ShareWithOrganization(ShareWithOrganizationRequest) returns (ShareWithOrganizationResponse);
+  // The service's runs paused for the person's answer (EN-43): of jobs
+  // they own, or in workspaces they're an Owner of.
+  rpc ListServiceApprovals(ListServiceApprovalsRequest) returns (ListServiceApprovalsResponse);
+  // Every job the organization's service runs in the person's workspaces
+  // (EN-42), with each one's workspace; the runs of one with
+  // GetServiceJob.
+  rpc ListServiceJobs(ListServiceJobsRequest) returns (ListServiceJobsResponse);
+  // The person's own use of the organization's models (EN-24): today's and
+  // this month's by model, each budget and quota that applies with what's
+  // left, the rate limits, and whether full prompt logs keep their
+  // requests.
+  rpc GetOrgUsage(GetOrgUsageRequest) returns (GetOrgUsageResponse);
+  // How the person hears of their jobs' runs on the organization's
+  // service (the enterprise spec's JB-31).
+  rpc GetOrgNotices(GetOrgNoticesRequest) returns (GetOrgNoticesResponse);
+  // Keeps how the person hears of their jobs' runs (JB-31).
+  rpc SetOrgNotices(SetOrgNoticesRequest) returns (SetOrgNoticesResponse);
+  // The workspace's items that can be published to the organization's
+  // catalog (EN-36): its .agents folder's agents, skills, rules,
+  // guardrails, commands and connectors, each with how it applies now and
+  // what the catalog would refuse.
+  rpc ListPublishable(ListPublishableRequest) returns (ListPublishableResponse);
+  // Publishes items to the organization's catalog as a review another
+  // Admin approves (EN-36; an Admin's; FAILED_PRECONDITION PROBLEMS when
+  // the catalog would refuse one).
+  rpc PublishToOrganization(PublishToOrganizationRequest) returns (PublishToOrganizationResponse);
+  // The catalog's reviews, the newest first (an Admin's).
+  rpc ListCatalogReviews(ListCatalogReviewsRequest) returns (ListCatalogReviewsResponse);
+  // The organization's catalog items this person gets (EN-34): each with
+  // its lock and groups, and whether the workspace has its own of that
+  // name (which a default gives way to).
+  rpc ListOrgItems(ListOrgItemsRequest) returns (ListOrgItemsResponse);
+  // Copies one of the organization's default items into the workspace's
+  // .agents folder, to change there (EN-34; FAILED_PRECONDITION LOCKED for
+  // a locked one, ALREADY_EXISTS when the workspace has its own).
+  rpc CopyOrgItem(CopyOrgItemRequest) returns (CopyOrgItemResponse);
+  // Approves or denies what a paused run asks for, with a note; the run
+  // goes on (FAILED_PRECONDITION ANSWERED when it isn't waiting any more).
+  rpc AnswerServiceRun(AnswerServiceRunRequest) returns (AnswerServiceRunResponse);
 }
 
 // Request message for ConfigService.GetInterfaceLanguage.
@@ -264,7 +385,7 @@ message ApiHeader {
 }
 
 // The api provider's settings: a gateway that speaks OpenAI's Responses
-// API, signed with these headers (spec_models_015 §3.4).
+// API, signed with these headers (spec_015_models §3.4).
 message ApiProviderSettings {
   // Requests go to <base_url>/responses.
   string base_url = 1;
@@ -480,6 +601,23 @@ message ListedModel {
   bool has_price = 2;
   double input_per_mtok = 3;
   double output_per_mtok = 4;
+  // What people call it, when the provider says (the organization's
+  // models); "" to show the ID.
+  string display_name = 5;
+  // The organization's default model.
+  bool is_default = 6;
+  // What the organization says its model can do (EN-21); unset when it
+  // says nothing, and for every other provider's models.
+  ModelCapabilities capabilities = 7;
+}
+
+// What a model can do.
+message ModelCapabilities {
+  bool tools = 1;
+  bool images = 2;
+  bool thinking = 3;
+  // Its context window in tokens; 0 when unknown.
+  int32 context = 4;
 }
 
 // Request message for ConfigService.GetSignIn.
@@ -698,7 +836,7 @@ message InstalledSkill {
 }
 
 // What a skill's scripts are, for the user to review before trusting
-// them (spec_skills_013 SK-108).
+// them (spec_013_skills SK-108).
 message SkillReview {
   // The skill's folder and content hash, for TrustSkillScripts.
   string dir = 1;
@@ -1097,7 +1235,7 @@ message ListBrowserProfilesResponse {
   repeated BrowserProfile profiles = 1;
   // The workspace's profile ("": none).
   string workspace_profile = 2;
-  // browser.show: ask, watch or silent (spec_agent_browser_050).
+  // browser.show: ask, watch or silent (spec_050_agent_browser).
   string show = 3;
   // browser.open: ask, embedded or system (AB-10).
   string open = 4;
@@ -1161,4 +1299,664 @@ message OpenBrowserProfileRequest {
 message OpenBrowserProfileResponse {
   // The browser opened.
   string browser = 1;
+}
+
+// The organization's service, as this computer sees it.
+message EnterpriseState {
+  // Its address; "" when this computer isn't connected to one.
+  string url = 1;
+  // What it said about itself when the person signed in, or when checked.
+  string name = 2;
+  string version = 3;
+  repeated string capabilities = 4;
+  bool signed_in = 5;
+  string email = 6;
+  string person_name = 7;
+  repeated string roles = 8;
+  // When the access token is next renewed, in Unix seconds; 0 until one
+  // is asked for.
+  int64 renews_unix = 9;
+  // A version of the organization's terms to accept, if any.
+  string terms_version = 10;
+  // Whether it answered, and why not, when checked.
+  bool checked = 11;
+  bool reachable = 12;
+  string error = 13;
+  // The machine-wide settings set the organization (EN-10): the person
+  // can't change or disconnect it.
+  bool managed = 14;
+}
+
+// Request message for ConfigService.GetEnterprise.
+message GetEnterpriseRequest {
+  bool check = 1;
+}
+
+// Response message for ConfigService.GetEnterprise.
+message GetEnterpriseResponse {
+  EnterpriseState state = 1;
+}
+
+// Request message for ConfigService.ConnectEnterprise.
+message ConnectEnterpriseRequest {
+  // The service's address, such as https://blitz.acme.com; "" to
+  // disconnect.
+  string url = 1;
+}
+
+// Response message for ConfigService.ConnectEnterprise.
+message ConnectEnterpriseResponse {
+  EnterpriseState state = 1;
+}
+
+// Request message for ConfigService.EnterpriseSignIn.
+message EnterpriseSignInRequest {
+  // Sign in with a code instead of a browser on this computer.
+  bool device = 1;
+}
+
+// Response message for ConfigService.EnterpriseSignIn: what to open and
+// enter, then the end.
+message EnterpriseSignInResponse {
+  string url = 1;
+  // The code to enter, for the device sign-in.
+  string code = 2;
+  bool done = 3;
+  EnterpriseState state = 4;
+}
+
+// Request message for ConfigService.EnterpriseSignOut.
+message EnterpriseSignOutRequest {}
+
+// Response message for ConfigService.EnterpriseSignOut.
+message EnterpriseSignOutResponse {
+  EnterpriseState state = 1;
+}
+
+// One of the organization's documents: its terms of service ("terms") or
+// privacy notice ("privacy"), as text or a link.
+message OrgDocument {
+  string document = 1;
+  string version = 2;
+  string text = 3;
+  string url = 4;
+}
+
+// The organization's branding.
+message Branding {
+  string name = 1;
+  string short_name = 2;
+  // "#rrggbb" for the light and the dark theme.
+  string accent = 3;
+  string accent_dark = 4;
+  string support = 5;
+  string about = 6;
+  // Data URLs by file name: logo.svg, logo-dark.svg, icon.png.
+  map<string, string> images = 7;
+  repeated OrgDocument documents = 8;
+}
+
+// Request message for ConfigService.GetBranding.
+message GetBrandingRequest {
+  // Ask the service first (with the kept copy's ETag).
+  bool refresh = 1;
+}
+
+// Response message for ConfigService.GetBranding.
+message GetBrandingResponse {
+  // Unset when there's none.
+  Branding branding = 1;
+  // Why the service couldn't be asked, when refresh was; the kept copy
+  // is answered all the same.
+  string error = 2;
+}
+
+// Request message for ConfigService.GetTerms.
+message GetTermsRequest {}
+
+// Response message for ConfigService.GetTerms.
+message GetTermsResponse {
+  // "" when none are in force.
+  string version = 1;
+  bool accepted = 2;
+  string text = 3;
+  string url = 4;
+}
+
+// Request message for ConfigService.AcceptTerms.
+message AcceptTermsRequest {
+  string version = 1;
+}
+
+// Response message for ConfigService.AcceptTerms.
+message AcceptTermsResponse {
+  EnterpriseState state = 1;
+}
+
+// One of the organization's workspaces.
+message OrgWorkspace {
+  string handle = 1;
+  string name = 2;
+  // owner, editor, runner or viewer.
+  string role = 3;
+  bool sync = 4;
+  string clone_url = 5;
+  // Where it is, or would be, cloned on this computer.
+  string dir = 6;
+  bool cloned = 7;
+}
+
+// Request message for ConfigService.ListOrgWorkspaces.
+message ListOrgWorkspacesRequest {}
+
+// Response message for ConfigService.ListOrgWorkspaces.
+message ListOrgWorkspacesResponse {
+  repeated OrgWorkspace workspaces = 1;
+  // The organization's name, for the list's heading.
+  string organization = 2;
+}
+
+// Request message for ConfigService.CreateOrgWorkspace.
+message CreateOrgWorkspaceRequest {
+  string name = 1;
+  // "" to make one from the name.
+  string handle = 2;
+  // The person's own: its handle ~<them>/<handle>, so anyone may have a "home".
+  bool personal = 3;
+}
+
+// Response message for ConfigService.CreateOrgWorkspace.
+message CreateOrgWorkspaceResponse {
+  OrgWorkspace workspace = 1;
+}
+
+// Request message for ConfigService.OpenOrgWorkspace.
+message OpenOrgWorkspaceRequest {
+  string handle = 1;
+}
+
+// Response message for ConfigService.OpenOrgWorkspace.
+message OpenOrgWorkspaceResponse {
+  // The clone's folder, to open as a workspace.
+  string dir = 1;
+  // It was cloned just now.
+  bool cloned = 2;
+}
+
+// Request message for ConfigService.GitCredential.
+message GitCredentialRequest {
+  string host = 1;
+}
+
+// Response message for ConfigService.GitCredential.
+message GitCredentialResponse {
+  bool ok = 1;
+  string username = 2;
+  string password = 3;
+}
+
+// Request message for ConfigService.GetOrgSync.
+message GetOrgSyncRequest {
+  string workspace = 1;
+}
+
+// A file with both versions kept: the shared one and this person's copy.
+message OrgSyncPair {
+  string shared = 1;
+  string mine = 2;
+}
+
+// Response message for ConfigService.GetOrgSync.
+message GetOrgSyncResponse {
+  string state = 1;
+  repeated OrgSyncPair pairs = 2;
+  // Why it's offline or refused, in Git's words ("" otherwise).
+  string error = 3;
+}
+
+// Request message for ConfigService.TakeServiceRun.
+message TakeServiceRunRequest {
+  // The organization workspace's folder.
+  string workspace = 1;
+  string job_id = 2;
+  string run_id = 3;
+}
+
+// Response message for ConfigService.TakeServiceRun.
+message TakeServiceRunResponse {
+  ServiceRun run = 1;
+}
+
+// Request message for ConfigService.SaveOrgSync.
+message SaveOrgSyncRequest {
+  string workspace = 1;
+}
+
+// Response message for ConfigService.SaveOrgSync: the sync's state after,
+// as GetOrgSync says it.
+message SaveOrgSyncResponse {
+  string state = 1;
+  repeated OrgSyncPair pairs = 2;
+  // Why it's offline or refused, in Git's words ("" otherwise).
+  string error = 3;
+}
+
+// A job the organization's service runs.
+message ServiceJob {
+  string id = 1;
+  // Its resource name (urn:blitz:jobs:<id>).
+  string urn = 2;
+  string name = 3;
+  string schedule = 4;
+  bool enabled = 5;
+  // Its next time, when it has one and is on.
+  google.protobuf.Timestamp next_run = 6;
+  // Its workspace's handle, and where it's cloned on this computer.
+  string workspace = 7;
+  string dir = 8;
+}
+
+// One of a service job's runs.
+message ServiceRun {
+  string id = 1;
+  // Its resource name (urn:blitz:runs:<id>).
+  string urn = 2;
+  // schedule, catch_up or now.
+  string trigger = 3;
+  // queued, running, succeeded, failed, skipped or stopped.
+  string status = 4;
+  // Why it failed, stopped or was skipped.
+  string note = 5;
+  // Its last message.
+  string output = 6;
+  double cost_usd = 7;
+  google.protobuf.Timestamp created = 8;
+  google.protobuf.Timestamp ended = 9;
+  // The branch its changes went to ("" for none).
+  string branch = 10;
+  // The name of the files it left (urn:blitz:artifacts:…).
+  string artifacts = 11;
+  // A paused run's request (status paused), and how it was answered
+  // (approve or deny, with a note).
+  ServiceRequest pending = 12;
+  string answer = 13;
+  string answer_note = 14;
+  // Whether its changes are on main too, and why not when they're on its
+  // branch only.
+  bool merged = 15;
+  string merge_note = 16;
+}
+
+// What a paused run asks for: a tool, the kind of thing it does, and what
+// exactly.
+message ServiceRequest {
+  string tool = 1;
+  string kind = 2;
+  string detail = 3;
+}
+
+// Request message for ConfigService.GetServiceJob.
+message GetServiceJobRequest {
+  // The workspace's folder: an organization workspace's clone.
+  string workspace = 1;
+  string name = 2;
+  // Its WORKER.md's path, to say when it's where the service doesn't look.
+  string path = 3;
+}
+
+// Response message for ConfigService.GetServiceJob.
+message GetServiceJobResponse {
+  bool found = 1;
+  ServiceJob job = 2;
+  // Its latest runs, newest first.
+  repeated ServiceRun runs = 3;
+  // Why it isn't found: "outside" (its WORKER.md isn't in
+  // .agents/workers/<name>/, where the service looks), "not_pushed" (its
+  // changes aren't on main: PushServiceJob), "saving" (sync is putting
+  // them there; sync_state says how it stands, detail why it failed), "not_service" (on main,
+  // but the service doesn't run it: detail says why), or "not_read" (the
+  // service hasn't read it yet).
+  string reason = 4;
+  string detail = 5;
+  // The workspace's sync state, for "saving" (GetOrgSync's).
+  string sync_state = 6;
+}
+
+// Request message for ConfigService.PushServiceJob.
+message PushServiceJobRequest {
+  // The workspace's folder: an organization workspace's clone.
+  string workspace = 1;
+  string name = 2;
+}
+
+// Response message for ConfigService.PushServiceJob: the job as the
+// service has it after reading main.
+message PushServiceJobResponse {
+  GetServiceJobResponse job = 1;
+}
+
+// Request message for ConfigService.RunServiceJob.
+message RunServiceJobRequest {
+  string job_id = 1;
+}
+
+// Response message for ConfigService.RunServiceJob.
+message RunServiceJobResponse {
+  ServiceRun run = 1;
+}
+
+// Request message for ConfigService.SetServiceJobEnabled.
+message SetServiceJobEnabledRequest {
+  string job_id = 1;
+  bool enabled = 2;
+}
+
+// Response message for ConfigService.SetServiceJobEnabled.
+message SetServiceJobEnabledResponse {}
+
+// One file a service job's run left.
+message ServiceRunFile {
+  // Its resource name (urn:blitz:artifacts:…/<path>).
+  string urn = 1;
+  // Its path in the run's files (out/report.csv, events.jsonl).
+  string path = 2;
+  int64 size = 3;
+  string media_type = 4;
+}
+
+// Request message for ConfigService.ListServiceRunFiles.
+message ListServiceRunFilesRequest {
+  // The run's files' name (ServiceRun.artifacts).
+  string artifacts = 1;
+}
+
+// Response message for ConfigService.ListServiceRunFiles.
+message ListServiceRunFilesResponse {
+  repeated ServiceRunFile files = 1;
+}
+
+// Request message for ConfigService.SaveServiceRunFile.
+message SaveServiceRunFileRequest {
+  // The file's name (ServiceRunFile.urn).
+  string urn = 1;
+}
+
+// Response message for ConfigService.SaveServiceRunFile.
+message SaveServiceRunFileResponse {
+  // Where it was saved.
+  string path = 1;
+}
+
+// A run going now on the organization's service.
+message GoingServiceRun {
+  ServiceRun run = 1;
+  string job_id = 2;
+  string job_name = 3;
+  // Its workspace's handle, and where it's cloned on this computer.
+  string workspace = 4;
+  string dir = 5;
+}
+
+// One run's change: queued, started, ended, or its branch pushed.
+message ServiceRunChange {
+  string run_id = 1;
+  string job_id = 2;
+  // Its workspace's handle, and where it's cloned on this computer.
+  string workspace = 3;
+  string dir = 4;
+  string status = 5;
+}
+
+// Request message for ConfigService.WatchServiceRuns.
+message WatchServiceRunsRequest {}
+
+// Response message for ConfigService.WatchServiceRuns.
+message WatchServiceRunsResponse {
+  // Every run going now.
+  repeated GoingServiceRun runs = 1;
+  // The change that sent it (none in the first).
+  ServiceRunChange change = 2;
+  // Always true: the page server's keepalives are empty messages.
+  bool listed = 3;
+}
+
+// Request message for ConfigService.ShareWithOrganization.
+message ShareWithOrganizationRequest {
+  // The folder.
+  string workspace = 1;
+  // The workspace's name ("" for the folder's).
+  string name = 2;
+  // Its handle ("" to make one from the name).
+  string handle = 3;
+  bool personal = 4;
+}
+
+// Response message for ConfigService.ShareWithOrganization.
+message ShareWithOrganizationResponse {
+  OrgWorkspace workspace = 1;
+  // What the person should know: changes saved first, large files.
+  repeated string notes = 2;
+}
+
+// Request message for ConfigService.ListServiceApprovals.
+message ListServiceApprovalsRequest {}
+
+// Response message for ConfigService.ListServiceApprovals.
+message ListServiceApprovalsResponse {
+  repeated GoingServiceRun runs = 1;
+}
+
+// Request message for ConfigService.AnswerServiceRun.
+message AnswerServiceRunRequest {
+  string run_id = 1;
+  bool approve = 2;
+  string note = 3;
+}
+
+// Response message for ConfigService.AnswerServiceRun.
+message AnswerServiceRunResponse {
+  ServiceRun run = 1;
+}
+
+// Request message for ConfigService.ListServiceJobs.
+message ListServiceJobsRequest {}
+
+// Response message for ConfigService.ListServiceJobs.
+message ListServiceJobsResponse {
+  repeated ServiceJob jobs = 1;
+}
+
+// What was used of one of the organization's models (or of every model,
+// for a limit on them all).
+message OrgUsed {
+  // The model's ID ("" for every model together).
+  string model = 1;
+  int64 requests = 2;
+  int64 input_tokens = 3;
+  int64 cached_input_tokens = 4;
+  int64 output_tokens = 5;
+  double cost_usd = 6;
+}
+
+// A budget (dollars) or quota (tokens) that applies to the person.
+message OrgLimit {
+  // person, group or org: whose it is.
+  string scope_kind = 1;
+  // day or month.
+  string period = 2;
+  // usd or tokens.
+  string unit = 3;
+  // The model it limits ("" for every model together).
+  string model = 4;
+  double amount_usd = 5;
+  int64 tokens = 6;
+  int64 input_tokens = 7;
+  int64 output_tokens = 8;
+  OrgUsed used = 9;
+  google.protobuf.Timestamp resets = 10;
+}
+
+// A model's requests and tokens a minute: everyone's, and each person's.
+message OrgRateLimit {
+  string model = 1;
+  int32 person_rpm = 2;
+  int32 person_tpm = 3;
+  int32 rpm = 4;
+  int32 tpm = 5;
+}
+
+// Request message for ConfigService.GetOrgUsage.
+message GetOrgUsageRequest {}
+
+// Response message for ConfigService.GetOrgUsage.
+message GetOrgUsageResponse {
+  repeated OrgUsed today = 1;
+  repeated OrgUsed month = 2;
+  repeated OrgLimit limits = 3;
+  repeated OrgRateLimit rate_limits = 4;
+  // Whether the organization's full prompt logs keep any of the person's
+  // requests.
+  bool prompt_logs = 5;
+}
+
+// An item in a workspace that can be published to the catalog.
+message PublishableItem {
+  // agent, skill, rule, guardrail, command or connector.
+  string kind = 1;
+  string name = 2;
+  // Its path in the catalog (and in the workspace's .agents folder).
+  string path = 3;
+  // What the catalog would refuse ("" none).
+  repeated string problems = 4;
+  // How it applies now: locked or default, and its groups.
+  string lock = 5;
+  repeated string groups = 6;
+}
+
+// Request message for ConfigService.ListPublishable.
+message ListPublishableRequest {
+  string workspace = 1;
+}
+
+// Response message for ConfigService.ListPublishable.
+message ListPublishableResponse {
+  repeated PublishableItem items = 1;
+}
+
+// An item to publish, and how it's to apply.
+message PublishItem {
+  string kind = 1;
+  string name = 2;
+  // locked or default ("" is default).
+  string lock = 3;
+  // Who it's for; everyone when none.
+  repeated string groups = 4;
+}
+
+// A change to the catalog, waiting for an Admin (its author too) or answered.
+message CatalogReview {
+  string id = 1;
+  string title = 2;
+  string by_email = 3;
+  repeated string paths = 4;
+  repeated string problems = 5;
+  // open, approved or rejected.
+  string state = 6;
+  string note = 7;
+  // The version it went out in, once approved (0 before).
+  int32 version = 8;
+  google.protobuf.Timestamp created = 9;
+}
+
+// Request message for ConfigService.PublishToOrganization.
+message PublishToOrganizationRequest {
+  string workspace = 1;
+  repeated PublishItem items = 2;
+  string title = 3;
+}
+
+// Response message for ConfigService.PublishToOrganization.
+message PublishToOrganizationResponse {
+  CatalogReview review = 1;
+}
+
+// Request message for ConfigService.ListCatalogReviews.
+message ListCatalogReviewsRequest {
+  // open, approved, rejected, or "" for all.
+  string state = 1;
+}
+
+// Response message for ConfigService.ListCatalogReviews.
+message ListCatalogReviewsResponse {
+  repeated CatalogReview reviews = 1;
+}
+
+// One of the organization's catalog items.
+message OrgItem {
+  // agent, skill, rule, guardrail, command, mcp or connector.
+  string kind = 1;
+  string name = 2;
+  // Its path in the catalog.
+  string path = 3;
+  // locked or default.
+  string lock = 4;
+  repeated string groups = 5;
+  // The workspace has its own of this name (a default gives way to it).
+  bool overridden = 6;
+}
+
+// Request message for ConfigService.ListOrgItems.
+message ListOrgItemsRequest {
+  string workspace = 1;
+  // One kind ("" for every one).
+  string kind = 2;
+}
+
+// Response message for ConfigService.ListOrgItems.
+message ListOrgItemsResponse {
+  repeated OrgItem items = 1;
+  // The catalog's version ("" before the first).
+  int32 version = 2;
+}
+
+// Request message for ConfigService.CopyOrgItem.
+message CopyOrgItemRequest {
+  string workspace = 1;
+  string kind = 2;
+  string name = 3;
+}
+
+// Response message for ConfigService.CopyOrgItem.
+message CopyOrgItemResponse {
+  // The files written, in the workspace.
+  repeated string paths = 1;
+}
+
+// How the person hears of their jobs' runs on the organization's service.
+message OrgNotices {
+  // By email (when the service sends email: email_available).
+  bool email = 1;
+  // An https address the notices are POSTed to ("": none).
+  string webhook = 2;
+  // Every run's end, not only failures and runs waiting for an answer.
+  bool every_run = 3;
+  bool email_available = 4;
+}
+
+// Request message for ConfigService.GetOrgNotices.
+message GetOrgNoticesRequest {}
+
+// Response message for ConfigService.GetOrgNotices.
+message GetOrgNoticesResponse {
+  OrgNotices notices = 1;
+}
+
+// Request message for ConfigService.SetOrgNotices.
+message SetOrgNoticesRequest {
+  OrgNotices notices = 1;
+}
+
+// Response message for ConfigService.SetOrgNotices.
+message SetOrgNoticesResponse {
+  OrgNotices notices = 1;
 }

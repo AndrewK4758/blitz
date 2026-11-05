@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { OrgItems } from "./OrgItems";
 import { GradeBadge } from "./GradeBadge";
 import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -42,7 +43,7 @@ import type { SkillFile, SkillInfo } from "../gen/blitz/v1/workspace_pb";
 import { SuggestTextarea } from "../SecretSuggest";
 import { SkillReviewDialog } from "../SkillReview";
 import { forgetSkills } from "../skillMention";
-import { Button, Chip, Dialog, Field, Icon, IconButton, Tabs, useSnackbar, MultiSelect } from "../ui/controls";
+import { Button, Chip, Dialog, Field, Icon, IconButton, Tabs, useSnackbar, MultiSelect } from "@blitz/webui";
 import { DraftButton } from "./Draft";
 import { evalsForSkill, runInBackground } from "./evalCoverage";
 import { SkillFiles } from "./SkillFiles";
@@ -59,7 +60,7 @@ type Open = { name: string } | null;
 type Tab = "general" | "references" | "scripts" | "scenarios";
 
 /**
- * The workspace's skills (Studio › Skills, spec_skills_013 SK-100–SK-103):
+ * The workspace's skills (Studio › Skills, spec_013_skills SK-100–SK-103):
  * its own, with their kind, fill the pane, with New and **Add from…**
  * (copy any skill the workspace sees, or reference it in the open meta
  * skill). A skill's form slides in over the list, as an agent's does,
@@ -237,6 +238,7 @@ export function SkillsPane({ workspace, onDirty }: { workspace: string; onDirty?
             );
           })}
         </div>
+        <OrgItems workspace={workspace} kind="skill" onCopied={() => void refresh()} />
       </aside>
       <section className="slide-detail" inert={open === null}>
         {open && (

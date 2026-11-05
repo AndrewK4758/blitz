@@ -45,6 +45,12 @@ func (w *Workspace) commandDirs() []struct{ dir, source string } {
 	for _, d := range []string{".blitz/commands", ".claude/commands", ".agents/workflows"} {
 		out = append(out, struct{ dir, source string }{filepath.Join(w.Dir(), filepath.FromSlash(d)), "project"})
 	}
+	// The organization's defaults before everyone's, its locked ones after
+	// (spec_053_enterprise EN-31).
+	if o := w.cfg.Org; o.Active() {
+		out = append([]struct{ dir, source string }{{filepath.Join(o.Defaults, "commands"), "organization"}}, out...)
+		out = append(out, struct{ dir, source string }{filepath.Join(o.Locked, "commands"), "organization"})
+	}
 	return out
 }
 
@@ -90,7 +96,7 @@ func (w *Workspace) ListCommands() []api.CommandInfo {
 	for _, c := range byName {
 		out = append(out, api.CommandInfo{Name: c.Name, Description: c.Description, ArgumentHint: c.ArgumentHint, Source: c.Source})
 	}
-	// Workflows run as /name (spec_workflows_043), over a command of the same name.
+	// Workflows run as /name (spec_043_workflows), over a command of the same name.
 	for _, f := range w.Workflows() {
 		out = slices.DeleteFunc(out, func(c api.CommandInfo) bool { return c.Name == f.Name })
 		out = append(out, api.CommandInfo{Name: f.Name, Description: cmp.Or(f.Description, i18n.T("flow.command")), ArgumentHint: i18n.T("flow.argument"), Source: "workflow"})

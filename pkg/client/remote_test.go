@@ -27,11 +27,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/retail-cortex/blitz/apps/service/servicetest"
 	"github.com/retail-cortex/blitz/pkg/api"
 	"github.com/retail-cortex/blitz/pkg/config"
 	"github.com/retail-cortex/blitz/pkg/engine"
 	"github.com/retail-cortex/blitz/pkg/engine/runtime"
+	"github.com/retail-cortex/blitz/pkg/service/servicetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -60,7 +60,7 @@ func gone(t *testing.T) (*Remote, *[]string) {
 }
 
 // An eval runs through the service: the run as it starts, each result as
-// it's scored, then the run (spec_evals_042).
+// it's scored, then the run (spec_042_evals).
 func TestRemoteRunEval(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MODENV_PREFIX", "")

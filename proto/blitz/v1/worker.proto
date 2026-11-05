@@ -89,6 +89,10 @@ service WorkerService {
   // picker: its cron form and its next runs, or why it can't be read
   // (problem, not an error, since it's asked as the user types).
   rpc PreviewSchedule(PreviewScheduleRequest) returns (PreviewScheduleResponse);
+  // Moves a job to the organization's service (runs_on: service; spec_053
+  // EN-40, EN-41): what keeps it from running there as it runs here, and,
+  // when nothing does or force, moves it, all else as written.
+  rpc MoveWorkerToService(MoveWorkerToServiceRequest) returns (MoveWorkerToServiceResponse);
 }
 
 // WorkerState is whether a worker may run.
@@ -136,8 +140,17 @@ message Worker {
   repeated string problems = 15;
   // Its latest recorded run (unset: none yet).
   WorkerRun last_run = 16;
-  // The workflow it runs, its prompt the input (spec_workflows_043).
+  // The workflow it runs, its prompt the input (spec_043_workflows).
   string workflow = 17;
+  // Where it runs: "here", or "service" when the organization's service
+  // runs it and this computer doesn't.
+  string runs_on = 18;
+  // What a run does when it needs more than it may do: "refuse", or
+  // "pause" for its owner's answer; "" for where it runs's default.
+  string on_request = 19;
+  // Where a run on the service leaves its changes: "main" (main too, when
+  // they merge cleanly) or "never" (its own branch only).
+  string merge = 20;
 }
 
 // Request message for WorkerService.ListWorkers.
@@ -176,6 +189,12 @@ message CreateWorkerRequest {
   string prompt = 13;
   // The workflow it runs, its prompt the input.
   string workflow = 14;
+  // "", "here" or "service".
+  string runs_on = 15;
+  // "", "refuse" or "pause".
+  string on_request = 16;
+  // "", "main" or "never".
+  string merge = 17;
 }
 
 // WorkerDefinition is a WORKER.md as written: its frontmatter fields and
@@ -202,6 +221,12 @@ message WorkerDefinition {
   string prompt = 12;
   // The workflow it runs, its prompt the input.
   string workflow = 13;
+  // "", "here" or "service".
+  string runs_on = 14;
+  // "", "refuse" or "pause".
+  string on_request = 15;
+  // "", "main" or "never".
+  string merge = 16;
 }
 
 // Request message for WorkerService.GetWorkerSpec.
@@ -445,7 +470,7 @@ message ListAllWorkersResponse {
 }
 
 // The global limits on every worker, as the settings have them
-// ([workers.policy]; spec_workers_023 WK-63). A worker asks for
+// ([workers.policy]; spec_023_workers WK-63). A worker asks for
 // permissions and limits; these remove what isn't allowed, fill in what
 // it leaves out, and cap the rest.
 message WorkerPolicySettings {
@@ -497,4 +522,21 @@ message PreviewScheduleResponse {
   repeated google.protobuf.Timestamp next_runs = 3;
   // Why the schedule can't be read; empty when it can.
   string problem = 4;
+}
+
+// Request message for WorkerService.MoveWorkerToService.
+message MoveWorkerToServiceRequest {
+  string workspace = 1;
+  string name = 2;
+  // Move it even with problems.
+  bool force = 3;
+}
+
+// Response message for WorkerService.MoveWorkerToService.
+message MoveWorkerToServiceResponse {
+  // What keeps it from running there as it runs here.
+  repeated string problems = 1;
+  bool moved = 2;
+  // The job, moved.
+  Worker worker = 3;
 }

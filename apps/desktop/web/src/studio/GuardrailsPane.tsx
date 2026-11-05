@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { OrgItems } from "./OrgItems";
 import { GradeBadge } from "./GradeBadge";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -38,7 +39,7 @@ import { message } from "../errors";
 import { t } from "../i18n";
 import type { BuiltinGuardrail, GuardrailFile } from "../gen/blitz/v1/workspace_pb";
 import { SuggestTextarea } from "../SecretSuggest";
-import { Button, Field, Icon, IconButton, Segmented, Switch, useSnackbar, MultiSelect } from "../ui/controls";
+import { Button, Field, Icon, IconButton, Segmented, Switch, useSnackbar, MultiSelect } from "@blitz/webui";
 import { DraftButton } from "./Draft";
 import { builtinDefaults, emptyGuardrailForm, formForBuiltin, formFromGuardrail, guardStages, sameGuardrailForm, specFromForm, stageHasTools, type BuiltinId, type GuardrailForm, type GuardStage } from "./guardrailForm";
 import { GatesTitle } from "./RulesOrGuardrails";
@@ -51,7 +52,7 @@ const builtinIcons: Record<BuiltinId, string> = { prompt_injection: mdiShieldAle
 type Open = { builtin: BuiltinId } | { name: string } | null;
 
 /**
- * The workspace's guardrails (Studio › Guardrails, spec_gates_041): the
+ * The workspace's guardrails (Studio › Guardrails, spec_041_gates): the
  * built-in ones, each switched on or off where it's listed, with its
  * settings a click away; then the workspace's own. A guardrail's form
  * slides in over the list as the others do: a built-in's settings (the
@@ -242,6 +243,7 @@ export function GuardrailsPane({ workspace, onDirty, onRules }: { workspace: str
             ))}
           </div>
         </section>
+        <OrgItems workspace={workspace} kind="guardrail" onCopied={() => void refresh()} />
       </aside>
       <section className="slide-detail" inert={open === null}>
         {open && (

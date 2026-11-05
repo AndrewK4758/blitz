@@ -108,6 +108,7 @@ func (w *Workspace) workerInfo(wk *workers.Worker, loadErr error, now time.Time)
 		Workspace: w.Dir(), Name: wk.Name, Description: wk.Description, Path: wk.Path, Hash: wk.Hash,
 		State:    w.workerStore.State(w.Dir(), wk, loadErr),
 		Schedule: wk.Schedule.Text, Cron: wk.Schedule.Cron, Agent: wk.Agent, Model: wk.Model, Workflow: wk.Flow, CatchUp: wk.CatchUp,
+		RunsOn: wk.RunsOn, OnRequest: wk.OnRequest, Merge: wk.Merge,
 	}
 	if wk.Schedule.Location != nil {
 		info.Timezone = wk.Schedule.Location.String()
@@ -194,7 +195,7 @@ func (w *Workspace) DraftWorker(spec api.WorkerSpec) (string, []byte, []string, 
 
 // PreviewSchedule is how text is understood as a schedule in the time zone
 // tz ("" for the service machine's): its cron form and its next n runs
-// after now (at most 20), for the schedule picker (spec_workers_023
+// after now (at most 20), for the schedule picker (spec_023_workers
 // WK-72) and create_job. A schedule it can't read is the parser's error.
 func PreviewSchedule(text, tz string, n int, now time.Time) (api.SchedulePreview, error) {
 	s, err := workers.ParseSchedule(text, tz)
@@ -428,6 +429,14 @@ type RunOptions struct {
 	OnStart func(api.Run)
 	// OnEvent receives the turn's events.
 	OnEvent func(api.Event)
+	// OnRequest decides what the worker's permissions don't allow (a job
+	// on the organization's service pauses for its owner's approval,
+	// spec_053 EN-43); nil refuses it (WK-42). A refusal is recorded either
+	// way.
+	OnRequest func(ctx context.Context, req api.ApprovalRequest) (api.Decision, error)
+	// Session goes on in a saved session, a paused run's, with Prompt
+	// (the answer to what it asked) in place of the worker's own.
+	Session, Prompt string
 }
 
 // RunWorker runs the named worker once, as its schedule would: in a
@@ -472,7 +481,12 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 	}
 	defer st.Release()
 	st.SetWorkspace(w.Dir())
-	rec, err := st.CreateSession(session.NewSessionID(), fmt.Sprintf("%s%s %s", workerTitlePrefix, name, run.Started.Format("2006-01-02 15:04")), agent)
+	var rec *session.SessionRecord
+	if o.Session != "" {
+		rec, err = st.Load(o.Session) // a paused run, going on
+	} else {
+		rec, err = st.CreateSession(session.NewSessionID(), fmt.Sprintf("%s%s %s", workerTitlePrefix, name, run.Started.Format("2006-01-02 15:04")), agent)
+	}
 	if err != nil {
 		return w.runFailed(run, o, err), err
 	}
@@ -483,9 +497,14 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 	}
 
 	var refusalsMu sync.Mutex
-	decide := func(_ context.Context, req api.ApprovalRequest) (api.Decision, error) {
+	decide := func(ctx context.Context, req api.ApprovalRequest) (api.Decision, error) {
 		if workers.Allows(eff.Permissions, req) {
 			return api.DecisionOnce, nil
+		}
+		if o.OnRequest != nil {
+			if d, err := o.OnRequest(ctx, req); err != nil || d != api.DecisionDeny {
+				return d, err
+			}
 		}
 		refusalsMu.Lock()
 		run.Refusals = append(run.Refusals, api.Refusal{Tool: req.Tool, Kind: req.Kind, Detail: req.Detail, Time: time.Now()})
@@ -532,8 +551,12 @@ func (w *Workspace) RunWorker(ctx context.Context, name string, o RunOptions) (a
 		}
 		_, runErr = w.runFlow(fctx, rec.ID, f, wk.Prompt, on)
 	default:
+		text, prompt := wk.Prompt, fmt.Sprintf(unattendedPreamble, name)+wk.Prompt
+		if o.Prompt != "" {
+			text, prompt = o.Prompt, o.Prompt
+		}
 		_, runErr = w.run(runCtx, rec.ID, turn{Turn: api.Turn{
-			Text: wk.Prompt, Prompt: fmt.Sprintf(unattendedPreamble, name) + wk.Prompt,
+			Text: text, Prompt: prompt,
 			MaxTurns: eff.Limits.MaxTurns, MaxCostUSD: eff.Limits.MaxCostUSD, Timeout: eff.Limits.Timeout,
 		}, run: run.ID}, on, st, opts...)
 	}

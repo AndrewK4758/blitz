@@ -38,14 +38,14 @@ import { useApp } from "./state";
 import { publishStatus } from "./status";
 import { message } from "./errors";
 import { t } from "./i18n";
-import { Icon, IconButton, useSnackbar } from "./ui/controls";
+import { Icon, IconButton, useSnackbar } from "@blitz/webui";
 import { includeAll } from "./includeAll";
 import { relayEnds, runRelay } from "./agentBrowserRelay";
 import { agentBrowser } from "./desktop";
 import { adoptPreview } from "./files/WebPreview";
 import { workspaces } from "./api";
-import { panelWidth, useWindowWidth } from "./ui/layout";
-import { ResizeHandle } from "./ui/ResizeHandle";
+import { panelWidth, useWindowWidth } from "@blitz/webui";
+import { ResizeHandle } from "@blitz/webui";
 import { Brand, MenuBar } from "./MenuBar";
 import { StudioDrawer, type StudioKind, type StudioOpen } from "./studio/StudioDrawer";
 import { intent as newIntent, type ItemIntent } from "./intent";
@@ -138,7 +138,7 @@ export function Workspace({
     return () => window.removeEventListener(viewEvent, f);
   }, [dir, showView]);
 
-  // The agent's browser in the app (spec_agent_browser_050): this
+  // The agent's browser in the app (spec_050_agent_browser): this
   // workspace's views, relayed while it's open; a watched one is a tab.
   useEffect(() => {
     if (!agentBrowser.supported()) return;
@@ -153,9 +153,9 @@ export function Workspace({
     return () => ctl.abort();
   }, [dir]);
 
-  // Files (spec_files_029): the shelf, the editor, Go to file.
+  // Files (spec_029_files): the shelf, the editor, Go to file.
   const snack = useSnackbar();
-  // Protect against committing keys (spec_secret_hooks_051 SH-03): the
+  // Protect against committing keys (spec_051_secret_hooks SH-03): the
   // hook goes in the repository, or the snack says why not.
   const protectRepository = () =>
     workspaces.installSecretHook({ workspace: dir }).then(

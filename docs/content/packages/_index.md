@@ -10,6 +10,7 @@ The packages under `pkg/` are shared by the apps. Each is a Go package in the on
 | [`api`](api.md) | Contract | `Backend`, and the values, events and errors front ends see |
 | [`client`](client.md) | Contract | `Backend` over the service's socket |
 | [`socket`](socket.md) | Contract | Where the service listens, and how to reach it |
+| [`service`](service.md) | Service | The Blitz service itself, so another program can run it |
 | [`engine`](engine.md) | Engine | Blitz without a user interface, and its subpackages |
 | [`config`](config.md) | Shared | Settings: loading, layering and editing `.env.toml` |
 | [`secrets`](secrets.md) | Shared | API keys in the OS keychain |
@@ -17,6 +18,8 @@ The packages under `pkg/` are shared by the apps. Each is a Go package in the on
 | [`images`](images.md) | Shared | Preparing pictures for vision models |
 | [`observability`](observability.md) | Shared | The diagnostic log and OpenTelemetry |
 | [`redact`](redact.md) | Shared | Masking secrets before they're written |
+| [`guardrails`](guardrails.md) | Shared | Blitz's guardrails on a model's request and reply, for a gateway |
+| [`catalog`](catalog.md) | Shared | An organization's catalog, checked as Blitz reads it |
 | [`legal`](legal.md) | Shared | The license texts every program shows |
 | [`sandboxsetup`](sandboxsetup.md) | Shared | Whether Linux's sandbox runs, and an AppArmor profile that lets it |
 | [`loginitem`](loginitem.md) | Shared | Starting the service at login |

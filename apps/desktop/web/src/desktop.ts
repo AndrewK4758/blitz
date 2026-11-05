@@ -89,6 +89,8 @@ type AppMethods = {
   GetPrefs(): Promise<Prefs>;
   SavePrefs(p: Prefs): Promise<Prefs>;
   OpenURL(url: string): Promise<void>;
+  /** Where a workspace's page (an .html file, relative to dir) is served on this computer, for a browser (EL-102). */
+  ServePage(dir: string, path: string): Promise<string>;
   OpenFolder(dir: string): Promise<void>;
   OpenDocument(path: string): Promise<void>;
   RevealPath(path: string): Promise<void>;
@@ -152,7 +154,7 @@ export interface PreviewContent {
   selection: string;
 }
 
-/** The desktop app's update, as its host says (spec_electron_038 EL-90). */
+/** The desktop app's update, as its host says (spec_038_electron EL-90). */
 export interface UpdateStatus {
   current: string;
   latest: string; // the latest release's tag
@@ -216,7 +218,7 @@ async function hostCall(method: string, args: unknown[]): Promise<unknown> {
 
 /**
  * What the Electron app's window answers (window.blitzElectron, from its
- * preload, spec_electron_038): the calls only a window can make, and its
+ * preload, spec_038_electron): the calls only a window can make, and its
  * events. The rest of the app's methods are its host's (/host/).
  */
 type ElectronWindow = {
@@ -412,6 +414,9 @@ export async function openURL(url: string): Promise<void> {
   return app().OpenURL(url);
 }
 
+/** Where a workspace's page is served on this computer, for a browser (EL-102): its scripts run, its relative files load. */
+export const servePage = (dir: string, path: string) => app().ServePage(dir, path);
+
 /** Shows a folder in the file manager (in the app, or from the tray). */
 export const openFolder = (dir: string) => app().OpenFolder(dir);
 
@@ -450,7 +455,7 @@ export const dragOut = (paths: string[]) => app().DragOut(paths);
 export const trashDropped = (paths: string[]) => app().TrashDropped(paths);
 
 /**
- * The agent's browser in the app (spec_agent_browser_050, EL-17): the
+ * The agent's browser in the app (spec_050_agent_browser, EL-17): the
  * window's views for it, and their events (agentbrowser:message, a
  * DevTools message from one; agentbrowser:closed). Electron's only.
  */
@@ -515,7 +520,7 @@ export function setAppMenu(l: AppMenuLabels) {
 
 /**
  * Tells the host the window is in use: it counts the install as active,
- * once a day (spec_active_installs_054 AI-01). Nothing when the host
+ * once a day (spec_054_active_installs AI-01). Nothing when the host
  * doesn't count, or the call fails.
  */
 export function markUsed() {
@@ -598,7 +603,7 @@ export function onTasksOpen(f: () => void): () => void {
   return on("tasks:open", () => f());
 }
 
-/** From the tasks window: opens the app's own window (spec_electron_038 EL-110). */
+/** From the tasks window: opens the app's own window (spec_038_electron EL-110). */
 export const openApp = () => app().OpenApp();
 /** Whether this window can open the app's own (the Electron app's tasks window). */
 export const canOpenApp = () => windowHas("OpenApp");
@@ -613,7 +618,7 @@ export function onNotificationOpen(f: (dir: string) => void): () => void {
 }
 
 /**
- * Whether web pages can open in the editor (spec_electron_038 EL-100):
+ * Whether web pages can open in the editor (spec_038_electron EL-100):
  * only the Electron app's window can show them.
  */
 export const canPreview = () => windowHas("PreviewOpen");

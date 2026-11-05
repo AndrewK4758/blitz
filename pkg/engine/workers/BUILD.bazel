@@ -31,6 +31,7 @@ go_library(
         "//apps/cli:__pkg__",
         "//apps/cli/internal/tui:__pkg__",
         "//apps/service:__subpackages__",
+        "//pkg/service:__subpackages__",
         "//pkg/client:__pkg__",
         "//pkg/engine:__subpackages__",
         "//pkg/pageserver:__pkg__",
@@ -38,7 +39,7 @@ go_library(
     deps = [
         "//pkg/api",
         "//pkg/config",
-        "@com_github_robfig_cron_v3//:cron",
+        "//pkg/jobspec",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )

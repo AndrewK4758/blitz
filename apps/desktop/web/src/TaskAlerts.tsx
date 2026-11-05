@@ -19,11 +19,11 @@ import { onTasksOpen } from "./desktop";
 import { onArrived, showTasks, useTasks } from "./humanTasks";
 import { t, tn } from "./i18n";
 import { notify } from "./notify";
-import { useSnackbar } from "./ui/controls";
+import { useSnackbar } from "@blitz/webui";
 
 /**
  * Announces workflows' human tasks as they arrive, as [ui] task_alerts
- * says (spec_workflows_043 WF-18): open shows the tasks dialog; notify
+ * says (spec_043_workflows WF-18): open shows the tasks dialog; notify
  * shows a snackbar with Open, or a system notification when the window
  * isn't in front (clicking it opens the dialog); off, nothing (the status
  * bar still shows them). The tray's "tasks waiting" opens the dialog too.

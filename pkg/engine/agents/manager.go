@@ -18,7 +18,7 @@
 // may loosen the permission mode only once the project is trusted) and
 // enabled plugins, each a name, a description, a system
 // prompt, the tools it may use and optionally its own model
-// (spec_agents_014).
+// (spec_014_agents).
 package agents
 
 import (
@@ -152,6 +152,19 @@ func (r *Registry) External() int {
 		}
 	}
 	return n
+}
+
+// SwitchOff takes the built-in agents named out (the organization's
+// policy, spec_053 EN-31); a name that isn't a built-in agent's is
+// ignored. Their names stay reserved: no file takes their place.
+func (r *Registry) SwitchOff(names []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, name := range names {
+		if r.builtin[name] {
+			delete(r.agents, name)
+		}
+	}
 }
 
 // IsBuiltin reports whether name is a built-in agent's.

@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+import { PublishDialog, useOrgAdmin } from "./PublishDialog";
+import { createPortal } from "react-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { mdiViewDashboardOutline, mdiBookOpenPageVariantOutline, mdiCalendarClock, mdiRefresh, mdiFlaskOutline, mdiKeyVariant, mdiConnection, mdiPuzzleOutline, mdiRobotOutline, mdiScaleBalance, mdiShieldLockOutline, mdiSitemapOutline } from "@mdi/js";
+import { mdiViewDashboardOutline, mdiBookOpenPageVariantOutline, mdiCalendarClock, mdiCloudUploadOutline, mdiRefresh, mdiFlaskOutline, mdiKeyVariant, mdiConnection, mdiPuzzleOutline, mdiRobotOutline, mdiScaleBalance, mdiShieldLockOutline, mdiSitemapOutline } from "@mdi/js";
 import { AgentEditor } from "../AgentEditor";
 import { workspaces } from "../api";
 import { message } from "../errors";
@@ -25,8 +27,8 @@ import { AgentScope } from "../gen/blitz/v1/workspace_pb";
 import { t, tn } from "../i18n";
 import { McpSettings } from "../McpSettings";
 import { SecretsEditor } from "../SecretsEditor";
-import { Icon, IconButton, useSnackbar } from "../ui/controls";
-import { Drawer } from "../ui/Drawer";
+import { Icon, IconButton, useSnackbar } from "@blitz/webui";
+import { Drawer } from "@blitz/webui";
 import { useDiscardGuard } from "./paneParts";
 import { ConnectorsPane } from "./ConnectorsPane";
 import { EvalsPane } from "./EvalsPane";
@@ -41,8 +43,8 @@ import { cost } from "../workflowRuns";
 import { OverviewPane } from "./OverviewPane";
 
 /**
- * The kinds Studio holds (spec_studio_040), after the Overview of them all
- * (spec_health_044), in the order an agent is built: the agent and the
+ * The kinds Studio holds (spec_040_studio), after the Overview of them all
+ * (spec_044_health), in the order an agent is built: the agent and the
  * evals that prove it, what it follows (skills, rules, guardrails), what
  * runs (workflows, workers), and what it reaches (connectors, secrets).
  */
@@ -75,7 +77,7 @@ export const studioIcons: Record<StudioKind, string> = {
 };
 
 /**
- * The workspace's Studio (spec_studio_040): what its .agents folder
+ * The workspace's Studio (spec_040_studio): what its .agents folder
  * holds, kind by kind, each listed and edited here: agents, skills,
  * workflows, evals, rules, guardrails, the connectors its agents use, and
  * its own secrets.
@@ -134,7 +136,7 @@ export function StudioDrawer({
     if (asked && initial.kind === "workflows") setKind("workflows");
   }, [asked, initial.kind]);
   // The dashboard, followed while Studio is open: the Overview's, and
-  // each list's grade badges (spec_health_044).
+  // each list's grade badges (spec_044_health).
   const { health, refresh: refreshHealth } = useWorkspaceHealth(dir);
   const grades = useMemo(() => {
     const m = new Map<string, string>();
@@ -173,6 +175,9 @@ export function StudioDrawer({
       snack(message(e), { error: true });
     }
   };
+  // An Admin publishes the workspace's items to the organization (EN-36).
+  const orgAdmin = useOrgAdmin();
+  const [publishing, setPublishing] = useState(false);
   return (
     <Drawer
       title={t("desktop.studio")}
@@ -181,8 +186,14 @@ export function StudioDrawer({
       className={`settings-drawer studio-drawer ${compact ? "is-compact" : ""}`}
       dirty={dirty}
       closeRequest={closeRequest}
-      headerActions={<IconButton icon={mdiRefresh} label={t("desktop.menu.agents.reload")} onClick={() => void reload()} />}
+      headerActions={
+        <>
+          {orgAdmin.admin && <IconButton icon={mdiCloudUploadOutline} label={t("desktop.publish.open")} onClick={() => setPublishing(true)} />}
+          <IconButton icon={mdiRefresh} label={t("desktop.menu.agents.reload")} onClick={() => void reload()} />
+        </>
+      }
     >
+      {publishing && createPortal(<PublishDialog dir={dir} org={orgAdmin.org} onClose={() => setPublishing(false)} />, document.body)}
       <div className="settings">
         <div className="settings-nav list" role="tablist">
           {studioGroups.map((group, i) => [

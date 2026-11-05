@@ -21,11 +21,12 @@ import { detectHost } from "./desktop";
 import { EditorPanel } from "./EditorPanel";
 import { editorConfig } from "./host";
 import { TasksApp } from "./TasksPanel";
-import { installQuietInputs } from "./ui/inputs";
-import "./m3.css";
+import { installQuietInputs } from "@blitz/webui";
+import "@blitz/webui/m3.css";
 import "./app.css";
-import "./glass.css";
-import "./themes.css";
+import "@blitz/webui/glass.css";
+import "@blitz/webui/themes.css";
+import "@blitz/webui/charts.css";
 import "./files/document.css";
 
 async function start() {

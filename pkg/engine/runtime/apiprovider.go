@@ -38,7 +38,7 @@ import (
 	"google.golang.org/adk/v2/model"
 )
 
-// The api provider (spec_models_015 §3.4): the adapter for the API the
+// The api provider (spec_015_models §3.4): the adapter for the API the
 // model speaks behind the gateway (MDL-100b), with a middleware that signs
 // each request with the configured headers and the session's token, and
 // fixes up the gateway's answers (apiresponse.go).
@@ -85,14 +85,24 @@ var anthropicAuthHeaders = []string{"X-Api-Key", "Authorization"}
 
 // apiProvider signs the api provider's requests.
 type apiProvider struct {
-	cfg        config.APIConfig
-	format     apiFormat
-	tokens     *sessionTokens // nil when nothing uses the placeholder
-	query      url.Values     // base_url's query, put on every request
-	tokenInURL bool           // base_url uses the placeholder
+	cfg    config.APIConfig
+	format apiFormat
+	tokens *sessionTokens // nil when nothing uses the placeholder
+	// source gives the token in place of a script: the organization's
+	// service's sign-in (spec_053_enterprise EN-20), which renews itself.
+	source tokenSource
+	// messagesAt is where Claude's requests go, under the base URL:
+	// /responses on a gateway that takes every model's there, /messages on
+	// the organization's service.
+	messagesAt string
+	query      url.Values // base_url's query, put on every request
+	tokenInURL bool       // base_url uses the placeholder
 
 	mu   sync.Mutex
 	drop []string // request fields the model refuses (MDL-104b)
+	// unstreamed is set once the gateway refuses to stream the Responses
+	// API (MDL-100c): its requests are then sent whole.
+	unstreamed bool
 }
 
 // newAPIModel builds the api provider's model from its settings. The token
@@ -102,7 +112,20 @@ func newAPIModel(ctx context.Context, c config.APIConfig, name string, pol retry
 	if err := c.Check(); err != nil {
 		return nil, err
 	}
-	p := &apiProvider{cfg: c, format: apiFormatOf(name), tokenInURL: strings.Contains(c.BaseURL, config.TokenPlaceholder)}
+	p := &apiProvider{cfg: c, format: apiFormatOf(name)}
+	if c.UsesToken() {
+		p.tokens = newSessionTokens(p.fetchToken)
+	}
+	return buildAPIModel(ctx, p, name, pol)
+}
+
+// buildAPIModel is the model p signs the requests of.
+func buildAPIModel(ctx context.Context, p *apiProvider, name string, pol retryPolicy) (model.LLM, error) {
+	c := p.cfg
+	p.tokenInURL = strings.Contains(c.BaseURL, config.TokenPlaceholder)
+	if p.messagesAt == "" {
+		p.messagesAt = "/responses"
+	}
 	if p.format == formatResponses && rejectsSampling(name) {
 		p.drop = slices.Clone(samplingParams)
 	}
@@ -114,9 +137,6 @@ func newAPIModel(ctx context.Context, c config.APIConfig, name string, pol retry
 		return nil, fmt.Errorf("[llm.api] base_url's query: %w", err)
 	}
 	p.query = query
-	if c.UsesToken() {
-		p.tokens = newSessionTokens(p.fetchToken)
-	}
 	baseURL := strings.ReplaceAll(base, config.TokenPlaceholder, escapedPlaceholder)
 	if p.format == formatMessages {
 		// No credentials or base URL from the environment; no server-side
@@ -133,6 +153,9 @@ func newAPIModel(ctx context.Context, c config.APIConfig, name string, pol retry
 	inner, err := newOpenAIModel(ctx, name, apiPlaceholderKey, baseURL, opts...)
 	if err != nil {
 		return nil, err
+	}
+	if t, ok := inner.(*toolCallParsingModel); ok {
+		t.streams = true // a gateway's models make real function calls
 	}
 	return &apiModel{inner: inner, p: p}, nil
 }
@@ -173,6 +196,16 @@ func (p *apiProvider) middleware(req *http.Request, next option.MiddlewareNext) 
 		return nil, err
 	}
 	res, err := next(p.sign(req, body, token))
+	if p.source != nil && err == nil && res.StatusCode == http.StatusUnauthorized {
+		// The service no longer takes it (it expired early, or the key
+		// that signed it changed): renewed once.
+		p.source.Invalidate()
+		if fresh, ferr := p.source.AccessToken(ctx); ferr == nil {
+			discardResponse(res)
+			token = fresh
+			res, err = next(p.sign(req, body, fresh))
+		}
+	}
 	if p.tokens != nil {
 		switch {
 		case err != nil || res.StatusCode >= http.StatusInternalServerError:
@@ -188,12 +221,31 @@ func (p *apiProvider) middleware(req *http.Request, next option.MiddlewareNext) 
 	}
 	// Each pass drops a new field, so this ends.
 	responses := p.format == formatResponses && p.isModelCall(req)
+	if err == nil && res.StatusCode == http.StatusBadRequest && responses && p.refusedStream(res) {
+		discardResponse(res)
+		res, err = next(p.sign(req, body, token))
+	}
 	for err == nil && res.StatusCode == http.StatusBadRequest && responses && p.refused(res, body) {
 		discardResponse(res)
 		res, err = next(p.sign(req, body, token))
 	}
 	if err == nil && responses && res.StatusCode/100 == 2 {
-		err = fixResponse(res)
+		switch {
+		case streamRequested(body) && isEventStream(res):
+			// The adapter asked for a stream (the service's turns do): the
+			// events go to it as they come, so the reply shows as it's
+			// written rather than when it's whole.
+		case streamRequested(body):
+			// A gateway that sends replies whole: the adapter reads it as
+			// a stream's last event.
+			if err = fixResponse(res); err == nil {
+				err = asEventStream(res)
+			}
+		default:
+			if err = foldStream(res); err == nil {
+				err = fixResponse(res)
+			}
+		}
 	}
 	keepErrorBody(ctx, res, err)
 	return res, err
@@ -214,6 +266,29 @@ func (p *apiProvider) refused(res *http.Response, body []byte) bool {
 	}
 	p.drop = append(p.drop, param)
 	return true
+}
+
+// refusedStream reports whether res refuses streaming (a gateway that
+// doesn't stream the Responses API, as OpenAI refuses a parameter), which
+// is then not asked for again (MDL-100c); res's body is left whole.
+func (p *apiProvider) refusedStream(res *http.Response) bool {
+	if unsupportedParam(peekBody(res)) != "stream" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.unstreamed {
+		return false
+	}
+	p.unstreamed = true
+	return true
+}
+
+// streams is whether the model's Responses requests ask for a stream.
+func (p *apiProvider) streams() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return !p.unstreamed
 }
 
 // dropped is the fields the model's requests leave out.
@@ -268,6 +343,9 @@ func keepErrorBody(ctx context.Context, res *http.Response, err error) {
 
 // token is session's token, or "" when nothing uses one.
 func (p *apiProvider) token(ctx context.Context, session string) (string, error) {
+	if p.source != nil {
+		return p.source.AccessToken(ctx)
+	}
 	if p.tokens == nil {
 		return "", nil
 	}
@@ -285,7 +363,7 @@ func (p *apiProvider) sign(req *http.Request, body []byte, token string) *http.R
 			// The gateway takes Claude's requests where it takes the others;
 			// the beta client's ?beta=true isn't the gateway's.
 			u := *r.URL
-			u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), messagesPath) + "/responses"
+			u.Path = strings.TrimSuffix(strings.TrimSuffix(u.Path, "/"), messagesPath) + p.messagesAt
 			u.RawPath = ""
 			q := u.Query()
 			q.Del("beta")
@@ -299,12 +377,22 @@ func (p *apiProvider) sign(req *http.Request, body []byte, token string) *http.R
 	for name, value := range p.cfg.Headers {
 		r.Header.Set(name, strings.ReplaceAll(value, config.TokenPlaceholder, token))
 	}
+	if p.source != nil {
+		// Which session and agent the call is for, so the service applies
+		// their guardrails and counts their use (EN-22).
+		if session := sessionOf(r.Context()); session != "" {
+			r.Header.Set("Blitz-Session", session)
+		}
+		if agent := agentOf(r.Context()); agent != "" {
+			r.Header.Set("Blitz-Agent", agent)
+		}
+	}
 	if len(p.query) > 0 || p.tokenInURL {
 		r.URL = p.requestURL(r.URL, token)
 	}
 	if body != nil {
 		if p.format == formatResponses && p.isModelCall(r) {
-			body = requestBodyFor(body, p.dropped())
+			body = requestBodyFor(body, p.dropped(), p.streams())
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
@@ -364,11 +452,15 @@ func (m *apiModel) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 	return func(yield func(*model.LLMResponse, error) bool) {
 		session := adkSessionID(ctx)
 		if _, err := m.p.token(ctx, session); err != nil {
-			yield(nil, fmt.Errorf("[llm.api] token script: %w", err))
+			if m.p.source != nil {
+				yield(nil, err)
+			} else {
+				yield(nil, fmt.Errorf("[llm.api] token script: %w", err))
+			}
 			return
 		}
 		var reply atomic.Pointer[errorReply]
-		ctx = context.WithValue(withSession(ctx, session), errorBodyKey{}, &reply)
+		ctx = context.WithValue(withAgent(withSession(ctx, session), adkAgentName(ctx)), errorBodyKey{}, &reply)
 		for resp, err := range m.inner.GenerateContent(ctx, req, stream) {
 			if err != nil {
 				err = apiError(err, reply.Load())
@@ -405,6 +497,12 @@ func apiError(err error, reply *errorReply) error {
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
 		return fmt.Errorf("[llm.api] the API rejected the token (HTTP %d). Check the token script, sign in again if needed, then retry", status)
 	}
+	// An organization's limit is that, never a model failure (spec_053
+	// EN-24): the gateway says whose, what's left and when it resets.
+	switch errorCode(body) {
+	case "budget_exceeded", "quota_exceeded":
+		return maskedError{errorMessage(body) + " Settings › Models (or blitz enterprise usage) shows what's left of each limit; another model may still be within yours.", ErrOrgLimit}
+	}
 	text := fmt.Sprintf("[llm.api] HTTP %d", status)
 	if s := http.StatusText(status); s != "" {
 		text += " " + s
@@ -430,6 +528,21 @@ func errorMessage(body string) string {
 		return e.Error.Message
 	}
 	return body
+}
+
+// ErrOrgLimit is a request the organization's gateway refused for a
+// budget or quota (spec_053 EN-24).
+var ErrOrgLimit = errors.New("your organization's limit is reached")
+
+// errorCode is an error body's error.code (the gateway's), else "".
+func errorCode(body string) string {
+	var e struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal([]byte(body), &e)
+	return e.Error.Code
 }
 
 // adapterPrefix starts the openai adapter's errors.

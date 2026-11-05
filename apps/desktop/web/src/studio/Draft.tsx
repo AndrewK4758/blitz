@@ -19,9 +19,9 @@ import { mdiCreationOutline } from "@mdi/js";
 import { workspaces } from "../api";
 import { message } from "../errors";
 import { t } from "../i18n";
-import { Button, Dialog } from "../ui/controls";
+import { Button, Dialog } from "@blitz/webui";
 
-/** What a draft is of (spec_studio_040 STU-05). */
+/** What a draft is of (spec_040_studio STU-05). */
 export type DraftKind = "agent" | "skill" | "script" | "rule" | "guardrail" | "eval" | "workflow_step" | "form";
 
 /**

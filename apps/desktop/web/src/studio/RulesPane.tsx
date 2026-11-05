@@ -39,10 +39,11 @@ import { message } from "../errors";
 import { t } from "../i18n";
 import type { RuleFile } from "../gen/blitz/v1/workspace_pb";
 import { SuggestTextarea } from "../SecretSuggest";
-import { Button, Field, Icon, IconButton, Segmented, useSnackbar, MultiSelect } from "../ui/controls";
+import { Button, Field, Icon, IconButton, Segmented, useSnackbar, MultiSelect } from "@blitz/webui";
 import { DraftButton } from "./Draft";
 import { GatesTitle } from "./RulesOrGuardrails";
 import { emptyRuleForm, formFromRule, moved, nextOrder, ruleSections, sameRuleForm, specFromForm, validRuleName, type RuleAction, type RuleForm, type RuleWhen } from "./ruleForm";
+import { OrgItems } from "./OrgItems";
 import { ConfirmDialog, ProblemList, useDiscardGuard } from "./paneParts";
 
 /** Each action's icon. */
@@ -52,7 +53,7 @@ const actionIcons: Record<RuleAction, string> = { block: mdiCancel, warn: mdiAle
 type Open = { name: string } | null;
 
 /**
- * The workspace's rules (Studio › Rules, spec_gates_041): the gates
+ * The workspace's rules (Studio › Rules, spec_041_gates): the gates
  * before the agent and after it, each list in the order its rules run
  * (dragged, or moved with ↑ ↓, which writes their order), then the
  * instruction rules; each with its action (block, warn, revise). A rule's
@@ -263,6 +264,7 @@ export function RulesPane({ workspace, onDirty, onGuardrails }: { workspace: str
             ))}
           </div>
         </section>
+        <OrgItems workspace={workspace} kind="rule" onCopied={() => void refresh()} />
       </aside>
       <section className="slide-detail" inert={open === null}>
         {open && (

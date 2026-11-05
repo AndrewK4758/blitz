@@ -22,7 +22,7 @@ import { t, tn } from "./i18n";
 import { notify } from "./notify";
 import { openWorkspace } from "./prefs";
 import { useApp } from "./state";
-import { Icon, Menu, useSnackbar } from "./ui/controls";
+import { Icon, Menu, useSnackbar } from "@blitz/webui";
 import { cost, failedStep, isGoing, ms, onRunEnded, progress, seeRun, took, unseenFailures, useWorkflowRuns, watchedRuns } from "./workflowRuns";
 
 /** Opens a run on its workflow's canvas (Studio › Workflows), in its workspace. */
@@ -50,7 +50,7 @@ export function endText(r: WorkflowRun): string {
 
 /**
  * Says when a workflow run ends, wherever it was started and whatever's
- * shown (spec_workflows_043 WF-19): a failure always (a snackbar with Open,
+ * shown (spec_043_workflows WF-19): a failure always (a snackbar with Open,
  * or a system notification when the window isn't in front); a run started
  * from the app (the canvas, a chat) finishing or stopping, briefly. A
  * worker's run that succeeds says nothing (its worker keeps the record).

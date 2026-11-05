@@ -15,7 +15,7 @@
  */
 
 
-// The visual editor (spec_visual_editor_037 §3): a Markdown file edited in
+// The visual editor (spec_037_visual_editor §3): a Markdown file edited in
 // its rendered form, in the document's own style (FIL-57), its code blocks
 // CodeMirror editors. It reads the tab's text and gives back Markdown
 // faithful to the file (VE-04): the tab keeps the text, so saving, unsaved
@@ -56,7 +56,7 @@ import {
 import { message } from "../../errors";
 import { t } from "../../i18n";
 import { followLink } from "../../Markdown";
-import { Button, ContextMenu, Icon, IconButton, useSnackbar, type MenuEntry } from "../../ui/controls";
+import { Button, ContextMenu, Icon, IconButton, useSnackbar, type MenuEntry } from "@blitz/webui";
 import type { LanguageHooks } from "../language";
 import { files } from "../../api";
 import { altText, imageExtensions, insertsIn, readDocDrop, relativeLink, type Insert } from "../docDrop";

@@ -23,15 +23,15 @@ import type { MCPServerConfig } from "./gen/blitz/v1/config_pb";
 import { t } from "./i18n";
 import { emptyForm, formProblems, fromForm, targetOf, toForm, type McpForm } from "./mcpForm";
 import { SuggestTextarea } from "./SecretSuggest";
-import { Button, Dialog, Icon, IconButton, Segmented, Switch, useSnackbar } from "./ui/controls";
+import { Button, Dialog, Icon, IconButton, Segmented, Switch, useSnackbar } from "@blitz/webui";
 
 /**
- * Settings › Connectors › MCP servers (spec_mcp_009 MCP-46): the global settings' MCP
+ * Settings › Connectors › MCP servers (spec_009_mcp MCP-46): the global settings' MCP
  * servers, each on or off; added and edited in a dialog, removed after
  * asking. Settings are global: how each does in a workspace is that
  * workspace's. Embedded, it's a section of Settings › Connectors, headed
  * as its categories are. With a workspace it's Studio › Connectors'
- * (spec_mcp_009 MCP-50): the servers that workspace runs, by scope. Its
+ * (spec_009_mcp MCP-50): the servers that workspace runs, by scope. Its
  * own are added, edited, removed and made global there; a global one is
  * shown as it is, with a switch turning it off or on in this workspace
  * alone and Edit in Settings (Studio never changes what other workspaces

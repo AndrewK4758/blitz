@@ -20,7 +20,7 @@ import { mdiCodeBraces, mdiPackageVariantClosed, mdiShieldCheckOutline } from "@
 import { config } from "./api";
 import { message } from "./errors";
 import { t } from "./i18n";
-import { Button, Dialog, Icon, useSnackbar } from "./ui/controls";
+import { Button, Dialog, Icon, useSnackbar } from "@blitz/webui";
 
 /** A skill's scripts to review, as ConfigService.GetSkillReview has them (or Studio's SkillInfo). */
 export interface ScriptsToReview {
@@ -30,7 +30,7 @@ export interface ScriptsToReview {
 }
 
 /**
- * Reviewing a skill's scripts before they run unasked (spec_skills_013
+ * Reviewing a skill's scripts before they run unasked (spec_013_skills
  * SK-108): after a registry install, or when Studio shows a skill whose
  * scripts are new or changed. Each script with its language, file and
  * the packages it installs, and where the skill is; **Trust these

@@ -25,6 +25,8 @@ export const windowMethods = [
   "ChooseFile",
   "Notify",
   "OpenURL",
+  // A workspace's page on the loopback server, for a browser (EL-102).
+  "ServePage",
   "PrintPDF",
   "SetAppearance",
   "SetMenu",
@@ -252,7 +254,7 @@ export interface DeepLink {
  * blitz://workflow?dir=<folder>&workflow=<name>[&run=<id>] (a workflow's
  * canvas, on a run; EL-111) and
  * blitz://processes?dir=<folder>[&id=<n>] (the agents' processes, one's
- * output; spec_processes_052): the folder must be an absolute path (whether
+ * output; spec_052_processes): the folder must be an absolute path (whether
  * it's a folder is the main process's to check), the prompt at most
  * maxLinkPrompt characters, the workflow named. Undefined otherwise.
  */
@@ -315,7 +317,7 @@ export function parseTasksLink(raw: string): TasksLink | undefined {
 }
 
 /**
- * What blitz://run says (spec_workflows_043 WF-19), from the tray when a
+ * What blitz://run says (spec_043_workflows WF-19), from the tray when a
  * workflow run fails with the app's window closed: the notification's
  * title and body (in the user's language), and the run to open when it's
  * clicked (its workspace, an absolute folder; its workflow; its ID).
@@ -348,6 +350,17 @@ export function parseRunLink(raw: string): RunLink | undefined {
 
 /** The page's one-time link, opening on the tasks window (the page server keeps tasks). */
 export const tasksURL = (link: string) => link + (link.includes("?") ? "&" : "?") + "tasks";
+
+/** Whether raw is blitz://show: the window, brought forward (the sign-in page's Open Blitz). */
+export function isShowLink(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return false;
+  }
+  return u.protocol === "blitz:" && (u.host || u.pathname.replace(/^\/+/, "")).replace(/\/$/, "") === "show";
+}
 
 /** The blitz:// links among a command line's arguments. */
 export const linkArgs = (argv: readonly string[]) => argv.filter((a) => a.startsWith("blitz:"));

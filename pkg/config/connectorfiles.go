@@ -22,7 +22,7 @@ import (
 	"strings"
 )
 
-// Where connectors' files live (spec_connectors_047), shared by the
+// Where connectors' files live (spec_047_connectors), shared by the
 // engine's connectors and the tray, which lists them without the engine:
 // a connectors folder in the settings folder (global) and in a
 // workspace's .agents, holding descriptors (kinds/, categories/) and a
@@ -42,6 +42,11 @@ const (
 const (
 	ConnectorScopeWorkspace = "workspace"
 	ConnectorScopeGlobal    = "global"
+	// The organization's catalog's connections (spec_053 EN-30): a locked
+	// one takes the place of the person's of its name, a default one gives
+	// way to it. Neither is the person's to change.
+	ConnectorScopeOrgLocked  = "org-locked"
+	ConnectorScopeOrgDefault = "org-default"
 )
 
 // connectorNameRE is a connection's (or a query's) name.

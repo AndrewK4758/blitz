@@ -15,8 +15,11 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"regexp"
@@ -25,7 +28,7 @@ import (
 	"strings"
 )
 
-// The api provider's bodies (spec_models_015 MDL-104, MDL-106): requests
+// The api provider's bodies (spec_015_models MDL-104, MDL-106): requests
 // never stored or streamed and without what the model refuses, and the
 // gateway's answers made into what the openai adapter reads. Only the
 // fields named change; the rest is kept as the bytes it was.
@@ -90,15 +93,15 @@ func hasField(body []byte, field string) bool {
 	return ok
 }
 
-// requestBodyFor is a /responses request body with "store" and "stream"
-// false and the fields in drop left out; a body that isn't a JSON object
-// is left as it is.
-func requestBodyFor(body []byte, drop []string) []byte {
+// requestBodyFor is a /responses request body with "store" false,
+// "stream" as stream says, and the fields in drop left out; a body that
+// isn't a JSON object is left as it is.
+func requestBodyFor(body []byte, drop []string, stream bool) []byte {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(body, &m) != nil || m == nil {
 		return body
 	}
-	m["store"], m["stream"] = json.RawMessage("false"), json.RawMessage("false")
+	m["store"], m["stream"] = json.RawMessage("false"), json.RawMessage(strconv.FormatBool(stream))
 	for k := range m {
 		if slices.Contains(drop, k) {
 			delete(m, k)
@@ -109,6 +112,106 @@ func requestBodyFor(body []byte, drop []string) []byte {
 		return body
 	}
 	return out
+}
+
+// foldStream makes a streamed /responses answer (server-sent events) the
+// one response the adapter reads: the response its last event carries
+// (response.completed, response.incomplete or response.failed), or a
+// failed one from an error event (MDL-100c). The stream is what keeps a
+// long reply from being cut by a timeout between Blitz and the model; the
+// adapter itself reads replies whole. An answer that isn't a stream is
+// left as it is.
+func foldStream(res *http.Response) error {
+	if res.Body == nil || !strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream") {
+		return nil
+	}
+	defer res.Body.Close()
+	var final json.RawMessage
+	sc := bufio.NewScanner(res.Body)
+	sc.Buffer(make([]byte, 64<<10), 64<<20)
+	var data bytes.Buffer
+	end := func() {
+		var e struct {
+			Type     string          `json:"type"`
+			Response json.RawMessage `json:"response"`
+			Message  string          `json:"message"`
+		}
+		if json.Unmarshal(data.Bytes(), &e) == nil {
+			switch e.Type {
+			case "response.completed", "response.incomplete", "response.failed":
+				final = e.Response
+			case "error":
+				final, _ = json.Marshal(map[string]any{"status": "failed", "output": []any{}, "error": map[string]string{"message": e.Message}})
+			}
+		}
+		data.Reset()
+	}
+	for sc.Scan() {
+		line := sc.Text()
+		switch {
+		case line == "":
+			end()
+		case strings.HasPrefix(line, "data:"):
+			if data.Len() > 0 {
+				data.WriteByte('\n')
+			}
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+		}
+	}
+	end()
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("the model's reply broke off: %w", err)
+	}
+	if final == nil {
+		return errors.New("the model's reply ended before it was complete")
+	}
+	res.Body = io.NopCloser(bytes.NewReader(final))
+	res.ContentLength = int64(len(final))
+	res.Header.Set("Content-Type", "application/json")
+	res.Header.Set("Content-Length", strconv.Itoa(len(final)))
+	return nil
+}
+
+// streamRequested reports whether a /responses request body asks for a
+// stream: the adapter's streaming call does, its one-shot call doesn't.
+func streamRequested(body []byte) bool {
+	var m struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(body, &m) == nil && m.Stream
+}
+
+// isEventStream reports whether res is server-sent events.
+func isEventStream(res *http.Response) bool {
+	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
+}
+
+// asEventStream makes a whole /responses answer the one event of a stream,
+// response.completed (or response.failed), for an adapter reading a
+// stream from a gateway that doesn't send one.
+func asEventStream(res *http.Response) error {
+	body, err := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if err != nil {
+		return err
+	}
+	var r struct {
+		Status string `json:"status"`
+	}
+	event := "response.completed"
+	if json.Unmarshal(body, &r) == nil && r.Status == "failed" {
+		event = "response.failed"
+	}
+	data, err := json.Marshal(map[string]json.RawMessage{"type": json.RawMessage(strconv.Quote(event)), "response": body})
+	if err != nil {
+		return err
+	}
+	out := "event: " + event + "\ndata: " + string(data) + "\n\n"
+	res.Body = io.NopCloser(strings.NewReader(out))
+	res.ContentLength = int64(len(out))
+	res.Header.Set("Content-Type", "text/event-stream")
+	res.Header.Set("Content-Length", strconv.Itoa(len(out)))
+	return nil
 }
 
 // fixResponse makes a successful /responses answer what the adapter

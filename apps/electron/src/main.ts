@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// The Electron trial's main process (spec_electron_038): it starts
+// The Electron trial's main process (spec_038_electron): it starts
 // blitz-tray --serve beside it (the page, the service's API and the
 // host's /host/ calls, on one loopback origin), opens a window on the
 // link it prints, and answers what only a window can do (the folder
@@ -27,6 +27,7 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { Pages } from "./pageserve";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, Notification, session, shell, WebContentsView, type MenuItemConstructorOptions, type NativeImage, type Session } from "electron";
 import {
@@ -55,6 +56,7 @@ import {
   shouldRenew,
   parseRunLink,
   parseTasksLink,
+  isShowLink,
   taskWindowMethods,
   tasksURL,
   pictureExtension,
@@ -431,6 +433,7 @@ function setMenu(l: MenuLabels) {
 
 /** A blitz:// link: to the page at once when it's up, else when it asks (PendingLinks). */
 async function receiveLink(raw: string) {
+  if (isShowLink(raw)) return ready ? openApp() : undefined;
   const tasks = parseTasksLink(raw);
   if (tasks) return showTasks(tasks);
   const failed = parseRunLink(raw);
@@ -444,6 +447,10 @@ async function receiveLink(raw: string) {
   // From the tray (Show in Blitz): the window comes forward, opened if it was closed.
   if (ready) void openApp();
 }
+
+/** A workspace's pages served to a browser (EL-102), started when one is first opened. */
+const pages = new Pages();
+app.on("will-quit", () => pages.close());
 
 /** Prints a page (whole HTML, pictures inline) to PDF, offscreen, its scripts off. */
 async function printPDF(html: string, pageSize: unknown): Promise<string> {
@@ -530,6 +537,8 @@ ipcMain.handle("blitz:call", async (e, method: unknown, args: unknown) => {
       await shell.openExternal(url);
       return;
     }
+    case "ServePage":
+      return pages.url(text(a, 0), text(a, 1));
     case "PrintPDF":
       return printPDF(text(a, 0), a[1]);
     case "SetAppearance":

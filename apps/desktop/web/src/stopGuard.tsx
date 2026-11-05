@@ -16,13 +16,13 @@
 
 
 // Asking before the service is stopped or restarted while workflow runs
-// go on in it: stopping it stops them (spec_workflows_043 WF-19).
+// go on in it: stopping it stops them (spec_043_workflows WF-19).
 
 import { useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { mdiAlertOutline } from "@mdi/js";
 import { t, tn } from "./i18n";
-import { Button, Dialog } from "./ui/controls";
+import { Button, Dialog } from "@blitz/webui";
 import { isGoing, useWorkflowRuns } from "./workflowRuns";
 
 /**

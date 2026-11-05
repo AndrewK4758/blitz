@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// The workspace dashboard's state and arithmetic (spec_health_044): the
+// The workspace dashboard's state and arithmetic (spec_044_health): the
 // service's WorkspaceHealth, followed live, and what the Overview and
 // Studio's grade badges make of it.
 
@@ -23,7 +23,7 @@ import { workspaces } from "../api";
 import type { HealthCheckScope, HealthDay, HealthItem, WorkspaceHealth } from "../gen/blitz/v1/workspace_pb";
 import type { MessageInitShape } from "@bufbuild/protobuf";
 import type { HealthCheckScopeSchema } from "../gen/blitz/v1/workspace_pb";
-import type { Column } from "../ui/charts";
+import type { Column } from "@blitz/webui";
 
 /** The kinds of item, in the dashboard's order. */
 export const healthKinds = ["agent", "skill", "rule", "guardrail", "eval", "workflow", "worker"] as const;

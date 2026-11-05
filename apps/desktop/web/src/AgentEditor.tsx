@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import { OrgItems } from "./studio/OrgItems";
 import { GradeBadge } from "./studio/GradeBadge";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -28,8 +29,8 @@ import { agencies, efforts, modes } from "./options";
 import { SuggestTextarea } from "./SecretSuggest";
 import { DraftButton } from "./studio/Draft";
 import { evalsForAgent, runInBackground } from "./studio/evalCoverage";
-import { Button, Dialog, Field, Icon, IconButton, Segmented, Switch, useSnackbar } from "./ui/controls";
-import { Drawer } from "./ui/Drawer";
+import { Button, Dialog, Field, Icon, IconButton, Segmented, Switch, useSnackbar } from "@blitz/webui";
+import { Drawer } from "@blitz/webui";
 import { workerName } from "./workerForm";
 import type { ItemIntent } from "./intent";
 
@@ -328,6 +329,7 @@ export function AgentEditor({
             );
           })}
         </div>
+        {scope === AgentScope.WORKSPACE && <OrgItems workspace={workspace} kind="agent" onCopied={() => void refresh()} />}
       </aside>
       )}
       <section className={`split-main ${slide ? "slide-detail" : ""}`} inert={slide && open === null}>

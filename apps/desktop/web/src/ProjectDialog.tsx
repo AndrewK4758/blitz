@@ -21,12 +21,12 @@ import { message } from "./errors";
 import type { ProjectItem, ProjectSettings } from "./gen/blitz/v1/workspace_pb";
 import { t } from "./i18n";
 import { projectItemText, projectReason, projectState } from "./project";
-import { Button, Dialog, useSnackbar } from "./ui/controls";
+import { Button, Dialog, useSnackbar } from "@blitz/webui";
 
 /**
  * A workspace's project settings (.blitz/settings.toml): what they would
  * do that needs trust, what applies without it, and what was ignored,
- * with Trust and Don't trust (spec_project_config_031 PRJ-33). Shown when
+ * with Trust and Don't trust (spec_031_project_config PRJ-33). Shown when
  * a workspace opens with settings waiting for a decision, from the bar
  * above the conversation, and from Settings › Workspaces.
  */

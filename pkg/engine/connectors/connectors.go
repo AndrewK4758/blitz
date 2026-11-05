@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package connectors is how Blitz's agents reach the systems a team
-// works with (spec_connectors_047): databases now, email and others
+// works with (spec_047_connectors): databases now, email and others
 // later. A connector is described, not coded: a category (Databases)
 // and its kinds (PostgreSQL, SQLite…) are YAML descriptors, the built-in
 // ones embedded and more read from <config>/connectors/kinds and a
@@ -284,7 +284,8 @@ type Connection struct {
 	// Name is the file's name; its tools are named <name>_<tool>.
 	Name     string
 	Category string
-	// Scope is workspace (.agents/connectors/<category>) or global.
+	// Scope is workspace (.agents/connectors/<category>), global, or the
+	// organization's (org-locked, org-default).
 	Scope string
 	Path  string
 	// Kind is its kind's ID ("" for a custom file the backend can't say).
@@ -322,6 +323,10 @@ func (c Connection) Key() string { return Key(c.Scope, c.Category, c.Name) }
 const (
 	ScopeWorkspace = config.ConnectorScopeWorkspace
 	ScopeGlobal    = config.ConnectorScopeGlobal
+	// ScopeOrgLocked and ScopeOrgDefault are the organization's catalog's
+	// layers (spec_053 EN-30): read-only here.
+	ScopeOrgLocked  = config.ConnectorScopeOrgLocked
+	ScopeOrgDefault = config.ConnectorScopeOrgDefault
 )
 
 // Origins of descriptors.

@@ -49,7 +49,7 @@ func NewModel(ctx context.Context, cfg *config.Config, overrideModel string) (mo
 	if overrideModel != "" {
 		ref = overrideModel
 	}
-	provider := strings.ToLower(cfg.LLM.Provider)
+	provider := defaultProvider(cfg)
 	p, modelName := ParseModelRef(ref, provider)
 	primary, err := newProviderModel(ctx, cfg, p, modelName)
 	if err != nil || len(cfg.LLM.FallbackModels) == 0 {
@@ -72,14 +72,24 @@ func NewModel(ctx context.Context, cfg *config.Config, overrideModel string) (mo
 // NewModelRef builds the single model a fallback reference names (no
 // chain), e.g. for `doctor` to check each fallback on its own.
 func NewModelRef(ctx context.Context, cfg *config.Config, ref string) (model.LLM, error) {
-	p, name := ParseModelRef(ref, cfg.LLM.Provider)
+	p, name := ParseModelRef(ref, defaultProvider(cfg))
 	return newProviderModel(ctx, cfg, p, name)
+}
+
+// defaultProvider is the provider a bare model name is: the
+// organization's while Blitz is connected to one, else llm.provider.
+func defaultProvider(cfg *config.Config) string {
+	if cfg.Enterprise.URL != "" {
+		return "enterprise"
+	}
+	return strings.ToLower(cfg.LLM.Provider)
 }
 
 // knownProviders are the provider prefixes recognised in model references.
 var knownProviders = map[string]bool{
 	"gemini": true, "anthropic": true, "openai": true, "ollama": true,
 	"bedrock": true, "azure": true, "vertex-anthropic": true, "api": true,
+	"enterprise": true,
 }
 
 // ParseModelRef splits "provider/model" into its parts. Without a known
@@ -158,6 +168,12 @@ func openAIKey(ctx context.Context, llm config.LLMConfig, provider string, pol r
 // newProviderModel builds one model of the given provider, applying its
 // [model_settings] on each call.
 func newProviderModel(ctx context.Context, cfg *config.Config, provider, modelName string) (model.LLM, error) {
+	if cfg.Enterprise.URL != "" && !(cfg.Org.Policy.Models.OwnProviders && provider != "") {
+		// Connected to an organization, its models are the models
+		// (spec_053_enterprise EN-20), unless its policy lets the person
+		// name one of their own (EN-35).
+		provider = "enterprise"
+	}
 	m, err := buildProviderModel(ctx, cfg, provider, modelName)
 	if err != nil {
 		return nil, err
@@ -225,6 +241,9 @@ func buildProviderModel(ctx context.Context, cfg *config.Config, provider, model
 
 	case "api":
 		return newAPIModel(ctx, cfg.LLM.API, modelName, pol)
+
+	case "enterprise":
+		return newEnterpriseModel(ctx, cfg, modelName, pol)
 
 	case "":
 		// If Gemini key is set and provider is empty, try gemini, else fallback to openai/ollama
@@ -446,6 +465,11 @@ type toolCallParsingModel struct {
 	// provider and key, when set, let a failed call say what the provider
 	// said (providerError), with the key masked.
 	provider, key string
+	// streams passes a streaming call's partial replies on, parsing only
+	// the whole one: for a gateway whose models make real function calls
+	// (the api and enterprise providers), so its reply shows as it's
+	// written.
+	streams bool
 }
 
 func (m *toolCallParsingModel) Name() string {
@@ -455,16 +479,16 @@ func (m *toolCallParsingModel) Name() string {
 func (m *toolCallParsingModel) GenerateContent(ctx context.Context, req *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		// Text-encoded tool calls can only be recognised in complete responses,
-		// so this wrapper never streams.
+		// so this wrapper streams only when told to, parsing the whole reply.
 		ctx, req := replaceImagesWithMarkers(ctx, req)
-		for resp, err := range m.inner.GenerateContent(ctx, req, false) {
+		for resp, err := range m.inner.GenerateContent(ctx, req, stream && m.streams) {
 			if err != nil {
 				if !yield(nil, providerError(err, m.provider, m.inner.Name(), m.key)) {
 					return
 				}
 				continue
 			}
-			if resp != nil && resp.Content != nil {
+			if resp != nil && resp.Content != nil && !resp.Partial {
 				parseTextToolCalls(resp.Content, offeredTools(req))
 			}
 			if !yield(resp, nil) {

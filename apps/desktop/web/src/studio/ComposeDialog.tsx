@@ -21,12 +21,12 @@ import { workspaces } from "../api";
 import { message } from "../errors";
 import type { ComposeDraft, ComposeSession } from "../gen/blitz/v1/workspace_pb";
 import { t } from "../i18n";
-import { Button, Dialog, Icon, useSnackbar } from "../ui/controls";
+import { Button, Dialog, Icon, useSnackbar } from "@blitz/webui";
 import { cost } from "../workflowRuns";
 import { draftSteps, question } from "./compose";
 
 /**
- * The composer (spec_composer_045): what the user wants, a short guided
+ * The composer (spec_045_composer): what the user wants, a short guided
  * conversation, then the drafted component, checked, to open in its
  * editor (onDraft). Closing ends the session.
  */

@@ -22,6 +22,8 @@ import {
   mdiXml,
   mdiCogOutline,
   mdiFolderMultipleOutline,
+  mdiDomain,
+  mdiOpenInNew,
   mdiKeyChainVariant,
   mdiKeyVariant,
   mdiProgressClock,
@@ -75,10 +77,13 @@ import { refreshTasks, useTasks, type TaskAlerts } from "./humanTasks";
 import { useAdvanced, useApp } from "./state";
 import { homeOf, libraryTabs, sectionShown, shownGroups, type SectionId } from "./simpleMode";
 import { paletteOf, type ThemePref } from "./theme";
-import { darkThemes, lightThemes, type DarkThemeId, type LightThemeId } from "./themes";
-import { Button, Chip, Dialog, Icon, IconButton, Segmented, Switch, Tabs, useSnackbar } from "./ui/controls";
-import { Drawer } from "./ui/Drawer";
+import { darkThemes, lightThemes, type DarkThemeId, type LightThemeId } from "@blitz/webui";
+import { Button, Chip, Dialog, Icon, IconButton, Segmented, Switch, Tabs, useSnackbar } from "@blitz/webui";
+import { Drawer } from "@blitz/webui";
 import { LookFields, WorkspaceSettingsForm } from "./WorkspaceSettingsForm";
+import { OrganizationSettings } from "./OrganizationSettings";
+import { logoFor, showOrgDocument, useDarkTheme, useOrgBranding } from "./orgBranding";
+import type { Branding } from "./gen/blitz/v1/config_pb";
 import { useWorkspaceSettings } from "./workspaceSettings";
 
 /**
@@ -89,6 +94,7 @@ export type Section = SectionId | "file";
 
 const sectionIcons: Record<SectionId, string> = {
   providers: mdiKeyChainVariant,
+  organization: mdiDomain,
   secrets: mdiKeyVariant,
   appearance: mdiPaletteOutline,
   agents: mdiBookshelf, // the Library's entry
@@ -178,6 +184,7 @@ export function SettingsDrawer({ onClose, initial = "providers", scope: initialS
               <Tabs label={t("desktop.settings.library")} value={section} tabs={libraryTabs.map((id) => ({ value: id, label: t(`desktop.settings.${id}`), icon: libraryIcons[id] }))} onChange={(id) => pick(id)} />
             )}
             {section === "providers" && <ProviderSettings workspace="" />}
+            {section === "organization" && <OrganizationSettings />}
             {section === "secrets" && <SecretsEditor />}
             {section === "appearance" && <Appearance />}
             {section === "agents" && <UserAgents />}
@@ -755,7 +762,7 @@ function CommandLine() {
 }
 
 /**
- * The app's update (spec_electron_038 EL-90): where it is, Check now,
+ * The app's update (spec_038_electron EL-90): where it is, Check now,
  * Download or Restart to update, the release's notes, and whether it's
  * looked for when the app opens.
  */
@@ -811,14 +818,45 @@ function Updates() {
   );
 }
 
+/**
+ * The organization's part of About (EN-52): its name and logo, about
+ * text, documents and support link, above Blitz's own.
+ */
+function OrgAbout({ org, logo }: { org: Branding; logo: string }) {
+  return (
+    <div className="stack" style={{ gap: 8 }}>
+      <div className="row">
+        {logo && <img src={logo} alt="" className="icon lg brand-mark" />}
+        <span className="t-title-lg">{org.name}</span>
+      </div>
+      {org.about && <p className="t-body-sm">{org.about}</p>}
+      <div className="row wrap">
+        {org.documents.map((d) => (
+          <Button key={d.document + d.version} small onClick={() => (d.url ? void openURL(d.url) : showOrgDocument(d))}>
+            {t(d.document === "privacy" ? "desktop.org.privacy" : "desktop.org.terms_doc", { version: d.version })}
+          </Button>
+        ))}
+        {org.support && (
+          <Button small icon={mdiOpenInNew} onClick={() => void openURL(org.support)}>
+            {t("desktop.org.support")}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function About() {
   const [version, setVersion] = useState("");
   useEffect(() => {
     appVersion().then(setVersion, () => setVersion("?"));
   }, []);
+  const org = useOrgBranding();
+  const dark = useDarkTheme();
   return (
     <div className="stack">
-      <span className="t-title-lg">{t("desktop.brand")}</span>
+      {org && <OrgAbout org={org} logo={logoFor(org, dark)} />}
+      <span className="t-title-lg">{org ? t("desktop.org.built_on") : t("desktop.brand")}</span>
       <span className="muted">{t("desktop.about.version", { version: shownVersion(version) })}</span>
       {canUpdate() && <Updates />}
       <p className="muted">{t("desktop.about.body", { file: "~/.blitz/desktop.json" })}</p>

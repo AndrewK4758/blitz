@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -72,6 +73,9 @@ func newFakeGateway(t *testing.T, replies ...[2]any) *fakeGateway {
 		}
 		g.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(reply, "event:") {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
 		w.WriteHeader(status)
 		_, _ = io.WriteString(w, reply)
 	}))
@@ -160,7 +164,7 @@ func inSession(id string) context.Context {
 
 // Requests carry the configured headers with the token, never an OpenAI
 // setting from the environment, and a body like the gateway's own example:
-// not stored, not streamed (MDL-101, MDL-104).
+// not stored, and streamed (MDL-101, MDL-104, MDL-100c).
 func TestAPIProviderRequests(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-from-env")
 	t.Setenv("OPENAI_ORG_ID", "org-from-env")
@@ -184,7 +188,7 @@ func TestAPIProviderRequests(t *testing.T) {
 	assert.Empty(t, r.Header.Get("OpenAI-Organization"))
 	assert.Empty(t, r.Header.Get("OpenAI-Project"))
 	assert.Equal(t, false, r.Body["store"])
-	assert.Equal(t, false, r.Body["stream"])
+	assert.Equal(t, true, r.Body["stream"])
 	assert.Equal(t, "gpt-5", r.Body["model"])
 	assert.Equal(t, "You are terse.", r.Body["instructions"])
 	assert.EqualValues(t, 100, r.Body["max_output_tokens"])
@@ -371,6 +375,23 @@ func TestAPIProviderErrorReason(t *testing.T) {
 	}
 }
 
+// An organization's budget or quota is said as the gateway says it, with
+// where to see what's left, never as a model's failure (spec_053 EN-24);
+// it's retried no more than any 429.
+func TestAPIProviderOrgLimit(t *testing.T) {
+	for _, code := range []string{"budget_exceeded", "quota_exceeded"} {
+		t.Run(code, func(t *testing.T) {
+			reply := `{"type":"error","code":"` + code + `","message":"Your daily budget of $5.00 is used up ($0.00 left). It resets Nov 3 00:00 UTC.","error":{"type":"` + code + `","code":"` + code + `","message":"Your daily budget of $5.00 is used up ($0.00 left). It resets Nov 3 00:00 UTC."}}`
+			g := newFakeGateway(t, [2]any{http.StatusTooManyRequests, reply})
+			_, _, err := callAPI(context.Background(), apiTestModel(t, g, "echo gw-token-limit-1", 0), helloRequest())
+			require.ErrorIs(t, err, ErrOrgLimit)
+			assert.Contains(t, err.Error(), "Your daily budget of $5.00 is used up ($0.00 left). It resets Nov 3 00:00 UTC.")
+			assert.Contains(t, err.Error(), "shows what's left")
+			assert.NotContains(t, err.Error(), "HTTP 429")
+		})
+	}
+}
+
 // Responses requests leave out what the model refuses: sampling for models
 // known to reject it (Claude's are the anthropic adapter's, below), and a field the gateway refused once, for that model from then
 // on; a refusal of a field the request needs isn't retried (MDL-104b).
@@ -537,4 +558,105 @@ func TestAPIProviderBuild(t *testing.T) {
 	assert.Equal(t, "gpt-5", listed[0].Models[0].ID)
 	assert.Equal(t, "the configured model", listed[0].Note)
 	assert.Contains(t, ConfiguredProviders(cfg), "api")
+}
+
+// The Responses API is streamed, so a long reply isn't cut by a timeout
+// between Blitz and the model, and the stream is folded into the one
+// reply the adapter reads; a gateway that refuses to stream is asked
+// unstreamed, and only once (MDL-100c).
+func TestAPIProviderStreams(t *testing.T) {
+	completed := `{"id":"resp_1","object":"response","status":"completed","model":"gpt-5","output":[{"type":"message","id":"m","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Streamed, then folded.","annotations":[]}]}],"usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7}}`
+	stream := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"status\":\"in_progress\"}}\n\n" +
+		": keep-alive\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Streamed\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n"
+	t.Run("folded", func(t *testing.T) {
+		g := newFakeGateway(t, [2]any{http.StatusOK, stream})
+		text, _, err := callAPI(context.Background(), apiTestModel(t, g, "", 0, noToken), helloRequest())
+		require.NoError(t, err)
+		assert.Equal(t, "Streamed, then folded.", text)
+	})
+	t.Run("broken off", func(t *testing.T) {
+		g := newFakeGateway(t, [2]any{http.StatusOK, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"})
+		_, _, err := callAPI(context.Background(), apiTestModel(t, g, "", 0, noToken), helloRequest())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ended before it was complete")
+	})
+	t.Run("failed", func(t *testing.T) {
+		failed := `{"status":"failed","output":[],"error":{"code":"model_error","message":"The model's reply broke off."}}`
+		g := newFakeGateway(t, [2]any{http.StatusOK, "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":" + failed + "}\n\n"})
+		_, _, err := callAPI(context.Background(), apiTestModel(t, g, "", 0, noToken), helloRequest())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reply broke off")
+	})
+	t.Run("streamed to a streaming turn as it comes", func(t *testing.T) {
+		g := newFakeGateway(t, [2]any{http.StatusOK, stream})
+		m := apiTestModel(t, g, "", 0, noToken)
+		var partial, final []string
+		for resp, err := range m.GenerateContent(context.Background(), helloRequest(), true) {
+			require.NoError(t, err)
+			if resp == nil || resp.Content == nil {
+				continue
+			}
+			text := ""
+			for _, p := range resp.Content.Parts {
+				text += p.Text
+			}
+			if resp.Partial {
+				partial = append(partial, text)
+			} else {
+				final = append(final, text)
+			}
+		}
+		assert.Contains(t, partial, "Streamed", "the delta before the end")
+		assert.Equal(t, []string{"Streamed, then folded."}, final)
+		assert.Equal(t, true, g.requests()[0].Body["stream"])
+	})
+	t.Run("a whole reply to a streaming turn", func(t *testing.T) {
+		g := newFakeGateway(t, [2]any{http.StatusOK, gwText})
+		m := apiTestModel(t, g, "", 0, noToken)
+		var final string
+		for resp, err := range m.GenerateContent(context.Background(), helloRequest(), true) {
+			require.NoError(t, err)
+			if resp != nil && !resp.Partial && resp.Content != nil {
+				for _, p := range resp.Content.Parts {
+					final += p.Text
+				}
+			}
+		}
+		assert.Equal(t, "One cell, c1, alive.", final)
+	})
+	t.Run("a failed whole reply to a streaming turn", func(t *testing.T) {
+		g := newFakeGateway(t, [2]any{http.StatusOK, gwFailed})
+		m := apiTestModel(t, g, "", 0, noToken)
+		var got error
+		for _, err := range m.GenerateContent(context.Background(), helloRequest(), true) {
+			if err != nil {
+				got = err
+			}
+		}
+		require.Error(t, got)
+		assert.Contains(t, got.Error(), "quota exceeded")
+	})
+	t.Run("a gateway that won't stream", func(t *testing.T) {
+		refusal := `{"error":{"type":"invalid_request_error","code":"unsupported_parameter","param":"stream","message":"Streaming isn't offered."}}`
+		g := newFakeGateway(t, [2]any{http.StatusBadRequest, refusal})
+		m := apiTestModel(t, g, "", 0, noToken)
+		for range 2 {
+			text, _, err := callAPI(context.Background(), m, helloRequest())
+			require.NoError(t, err)
+			assert.Equal(t, "One cell, c1, alive.", text)
+		}
+		got := g.requests()
+		require.Len(t, got, 3, "refused once, then sent whole each time")
+		assert.Equal(t, true, got[0].Body["stream"])
+		assert.Equal(t, false, got[1].Body["stream"])
+		assert.Equal(t, false, got[2].Body["stream"])
+	})
+}
+
+// noToken is api settings without a token script.
+func noToken(c *config.APIConfig) {
+	c.TokenScript = ""
+	c.Headers = map[string]string{"X-Tenant": "retail"}
 }

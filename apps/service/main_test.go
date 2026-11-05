@@ -19,6 +19,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,6 +33,14 @@ func TestUsageErrors(t *testing.T) {
 	}
 	code := run(context.Background(), []string{"--version"})
 	assert.Equal(t, 0, code, "blitzd --version: exit %d", code)
+	t.Setenv("BLITZ_RUN", "")
+	assert.Equal(t, exitUsage, run(context.Background(), []string{"run-job"}), "not a job's run")
+	for k, v := range map[string]string{"BLITZ_SERVICE": "http://127.0.0.1:1", "BLITZ_RUN": "r1", "BLITZ_RUN_SECRET": "s",
+		"BLITZ_CLONE_URL": "http://127.0.0.1:1/git/plans.git", "BLITZ_JOB": "digest"} {
+		t.Setenv(k, v)
+	}
+	t.Setenv("HOME", t.TempDir())
+	assert.Equal(t, exitFailure, run(context.Background(), []string{"run-job"}), "a service it can't reach")
 }
 
 // --license shows the NOTICE, the Apache License or the third-party
@@ -91,4 +100,22 @@ func TestDoctor(t *testing.T) {
 func TestPromptFileMissing(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	assert.Equal(t, exitUsage, run(context.Background(), []string{"--exit-with-stdin", "--append-system-prompt-file", filepath.Join(t.TempDir(), "missing.md"), "--socket", filepath.Join(t.TempDir(), "s.sock")}))
+}
+
+// blitzd git-credential answers nothing with no service running, so Git
+// goes on to say it can't sign in; another action is a usage error.
+func TestGitCredential(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "gc") // socket paths must be short
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Setenv("BLITZ_SOCKET", filepath.Join(dir, "s.sock"))
+	cmd := newGitCredentialCommand()
+	var out strings.Builder
+	cmd.SetIn(strings.NewReader("protocol=https\nhost=blitz.acme.com\n\n"))
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"get"})
+	require.NoError(t, cmd.ExecuteContext(context.Background()))
+	assert.Empty(t, out.String())
+	cmd.SetArgs([]string{"list"})
+	assert.Error(t, cmd.ExecuteContext(context.Background()))
 }

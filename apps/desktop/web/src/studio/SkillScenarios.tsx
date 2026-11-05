@@ -21,7 +21,7 @@ import { workspaces } from "../api";
 import { message } from "../errors";
 import { t, tn } from "../i18n";
 import type { EvalResult, EvalRun, SkillFile, SkillScenario, TrySkillResponse } from "../gen/blitz/v1/workspace_pb";
-import { Button, Dialog, Field, Icon, IconButton, Switch, useSnackbar } from "../ui/controls";
+import { Button, Dialog, Field, Icon, IconButton, Switch, useSnackbar } from "@blitz/webui";
 import { money, resultsCost } from "./evalForm";
 import { Results, statusClass, statusIcon } from "./EvalsPane";
 import { scenarioName } from "./skillForm";
@@ -38,7 +38,7 @@ interface ScenarioForm {
 }
 
 /**
- * A skill's Scenarios tab (spec_skills_013 SK-111, SK-112): **Try it**
+ * A skill's Scenarios tab (spec_013_skills SK-111, SK-112): **Try it**
  * runs a prompt once (the skill offered, or given), showing whether the
  * agent used it and what it said; **Keep it** saves that as a scenario
  * (scenarios/<name>.md, Castor's format); the skill's scenarios are

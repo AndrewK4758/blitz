@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { watchWorkerFailures } from "./workerFailures";
 import { useCountUse } from "./activity";
+import { appName, OrgBanner, OrgDocumentDialog, startBranding, TermsGate, useOrgBranding } from "./orgBranding";
 import { mdiAlertOutline, mdiFolderOpenOutline, mdiLightningBolt, mdiServerOff } from "@mdi/js";
 import { config as configAPI, onServiceLost, workspaces as workspaceAPI } from "./api";
 import { appVersion, chooseWorkspace, type LicenseText, installService, onAppMenu, onDeepLink, onNotificationOpen, restartService, serviceStatus, type ServiceStatus, setAppMenu, toggleFullscreen } from "./desktop";
@@ -45,8 +46,8 @@ import { StatusBar } from "./StatusBar";
 import { ComposerDock, focusComposerEvent, isFocusComposerKey } from "./composerDock";
 import { forgetStatus } from "./status";
 import { AppStateProvider, useApp } from "./state";
-import { Button, Dialog, Icon, SnackbarProvider, useSnackbar } from "./ui/controls";
-import { DrawerProvider, DrawerSlot } from "./ui/Drawer";
+import { Button, Dialog, Icon, SnackbarProvider, useSnackbar } from "@blitz/webui";
+import { DrawerProvider, DrawerSlot } from "@blitz/webui";
 import { restart, useAutoUpdate } from "./updates";
 import { Workspace } from "./Workspace";
 
@@ -168,6 +169,9 @@ function Shell() {
   const [confirmClose, setConfirmClose] = useState<string | null>(null);
   const snack = useSnackbar();
   const { service, error, check, setError } = useServiceStatus();
+  // The organization's look, kept current while the service is up (EN-50).
+  const up = service.state === "up";
+  useEffect(() => (up ? startBranding() : undefined), [up]);
   // The terminal's language setting and the user's catalogs (BL-DSK-41).
   useEffect(() => {
     if (service.state !== "up") return;
@@ -183,10 +187,10 @@ function Shell() {
   }, [seen, service.state]);
   const version = useServiceVersion(service.state === "up");
   // The window in use counts the install as active, once a day
-  // (spec_active_installs_054).
+  // (spec_054_active_installs).
   useCountUse();
   // The app's update: looked for when it opens (every five days at most),
-  // downloaded, then offered with Restart (spec_electron_038 EL-90).
+  // downloaded, then offered with Restart (spec_038_electron EL-90).
   useAutoUpdate(loaded && service.state === "up" && prefs.updates !== "off", (s) =>
     snack(t("desktop.update.snack", { version: s.latest }), {
       action: { label: t("desktop.update.restart_short"), run: () => void restart((m) => snack(m, { error: true })) },
@@ -379,6 +383,7 @@ function Shell() {
             </div>
           )}
           {service.state === "up" && version.stale && <StaleService state={version} check={version.check} />}
+          {service.state === "up" && <OrgBanner onSignIn={() => openSettings("organization")} />}
           <div className="main-row">
             <div className="main-col">
               {open_.length === 0 && <Welcome onOpen={open} onClose={close} onSettings={openSettings} onSearch={() => setPaletteOpen(true)} />}
@@ -403,6 +408,8 @@ function Shell() {
         {/* The pinned composer's bar, across every panel. */}
         {pinned && <div className="composer-dock" ref={setDockEl} />}
         <StatusBar serviceUp={service.state === "up"} version={version.info?.version} onWorkspaceSettings={(dir) => openSettings("workspaces", dir)} />
+        {service.state === "up" && <TermsGate />}
+        <OrgDocumentDialog />
         {unsavedClose && (
           <UnsavedDialog
             names={[displayName(prefs.workspaces.find((w) => w.dir === unsavedClose) ?? { dir: unsavedClose })]}
@@ -502,6 +509,7 @@ function ServiceDown({ status, onStarted, error, setError }: { status: ServiceSt
 }
 
 function Welcome({ onOpen, onClose, onSettings, onSearch }: { onOpen: () => void; onClose: (dir: string) => void; onSettings: (section: Section, scope?: string) => void; onSearch: () => void }) {
+  const org = useOrgBranding();
   const { prefs, update } = useApp();
   const recent = recentWorkspaces(prefs).slice(0, 6);
   return (
@@ -513,7 +521,7 @@ function Welcome({ onOpen, onClose, onSettings, onSearch }: { onOpen: () => void
         <MenuBar onSearch={onSearch} onSettings={onSettings} onOpenWorkspace={onOpen} onCloseWorkspace={onClose} />
       </header>
       <div className="welcome-body">
-        <h1 className="t-display">{t("desktop.welcome.title")}</h1>
+        <h1 className="t-display">{t("desktop.welcome.title", { app: appName(org) })}</h1>
         <p className="t-title muted">{t("desktop.welcome.body")}</p>
         <ConnectModelCard onSetUp={() => onSettings("providers")} />
         <Button variant="filled" icon={mdiFolderOpenOutline} onClick={onOpen}>

@@ -21,7 +21,7 @@ import { canCall, signInWindow } from "./desktop";
 import { message } from "./errors";
 import type { BrowserProfile } from "./gen/blitz/v1/config_pb";
 import { t } from "./i18n";
-import { Button, Dialog, Icon, IconButton, useSnackbar } from "./ui/controls";
+import { Button, Dialog, Icon, IconButton, useSnackbar } from "@blitz/webui";
 
 /** Whether name can name a profile: lowercase letters, digits, - and _, up to 32. */
 export const validProfileName = (name: string) => /^[a-z0-9][a-z0-9_-]{0,31}$/.test(name);
@@ -32,7 +32,7 @@ export const domainsText = (d: readonly string[]) => d.join("\n");
 export const parseDomains = (text: string) => [...new Set(text.split(/[\s,]+/).map((d) => d.trim().toLowerCase()).filter(Boolean))];
 
 /**
- * Settings › Browser (spec_browser_profiles_049): the browser profiles
+ * Settings › Browser (spec_049_browser_profiles): the browser profiles
  * the agents browse with, so they can use the sign-ins (OAuth, SSO, a
  * site's own) the person made in them. Each: Sign in… (a window of the
  * app's on the profile, for the browsing the agent does in the app),
@@ -78,7 +78,7 @@ export function BrowserSettings() {
   const problem = name && !validProfileName(name) ? t("desktop.browser.bad_name") : "";
   return (
     <div className="stack browser-settings" style={{ gap: 12 }}>
-      {/* How the agent browses while the app is open (spec_agent_browser_050 AB-02). */}
+      {/* How the agent browses while the app is open (spec_050_agent_browser AB-02). */}
       <label className="field">
         <span className="t-label">{t("desktop.browser.show")}</span>
         <select className="select" value={show} disabled={busy} onChange={(e) => void act(() => config.setConfigValue({ workspace: "", key: "browser.show", value: e.target.value }), t("desktop.browser.show_saved"))}>

@@ -3,7 +3,7 @@ title: Architecture
 weight: 40
 ---
 
-Blitz is a monorepo of its programs (the CLI, the service, the tray, the Electron desktop app and the VS Code extension) over shared Go packages, in one Go module (`github.com/retail-cortex/blitz`) built with Bazel. Spec: [monorepo](../about/specs/spec_monorepo_028.md).
+Blitz is a monorepo of its programs (the CLI, the service, the tray, the Electron desktop app and the VS Code extension) over shared Go packages, in one Go module (`github.com/retail-cortex/blitz`) built with Bazel. Spec: [monorepo](../about/specs/spec_028_monorepo.md).
 
 ## Layers
 
@@ -32,7 +32,7 @@ flowchart TB
 
 ## The dependency rules
 
-- Apps depend on `pkg/`, never on each other. (Tests may run the service through `apps/service/servicetest`.)
+- Apps depend on `pkg/`, never on each other. (Tests may run the service through `pkg/service/servicetest`.)
 - Front ends (the REPL, the desktop app), `pkg/api`, `pkg/client` and `pkg/socket` never reach the engine. Only the service and the CLI's `--local` mode link it.
 
 The rules are enforced twice: the engine's Bazel `visibility` lists only who may use it, and `bazel run //tools:check_deps` (in CI) queries the build graph and fails on any library that breaks them.

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// The user docs in the app (spec_desktop_024 DSK-103): the docs of this
+// The user docs in the app (spec_024_desktop DSK-103): the docs of this
 // release, from the page itself (docs/content.ts, its own chunk), with
 // their navigation, search, and back and forward. A link to a page the app
 // doesn't carry, and "Open on the web", go to the website.
@@ -23,8 +23,8 @@ import { mdiArrowLeft, mdiArrowRight, mdiBookOpenPageVariantOutline, mdiFormatLi
 import { openURL } from "../desktop";
 import { t } from "../i18n";
 import { DocsLinksProvider, Markdown, type DocsLinks } from "../Markdown";
-import { Icon, IconButton } from "../ui/controls";
-import { Drawer } from "../ui/Drawer";
+import { Icon, IconButton } from "@blitz/webui";
+import { Drawer } from "@blitz/webui";
 import { docLink, docPicture, searchDocs, siteURLOf, type DocNode, type DocPage } from "./index";
 import { loadAppDocs, type AppDocs as Docs } from "./load";
 import { firstPage, lastPlace, savePlace } from "./place";

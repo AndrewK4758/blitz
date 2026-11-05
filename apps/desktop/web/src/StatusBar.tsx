@@ -15,12 +15,27 @@
  */
 
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useServiceApprovals, useServiceRuns } from "./serviceRuns";
+import { notify } from "./notify";
+import type { GoingServiceRun } from "./gen/blitz/v1/config_pb";
+import { ms, took } from "./workflowRuns";
 import {
+  mdiAccountAlertOutline,
   mdiAccountCheckOutline,
+  mdiAccountClockOutline,
+  mdiCheck,
+  mdiClose,
   mdiAlertCircleOutline,
   mdiAlertOutline,
+  mdiFileCompare,
+  mdiCloudSyncOutline,
+  mdiCloudOffOutline,
+  mdiCloudAlertOutline,
+  mdiCloudUploadOutline,
+  mdiCloudCheckOutline,
+  mdiCloudOutline,
   mdiCircleMedium,
   mdiCloseCircleOutline,
   mdiCreationOutline,
@@ -35,13 +50,14 @@ import {
   mdiTuneVariant,
   mdiVectorPolyline,
 } from "@mdi/js";
-import { workspaces } from "./api";
+import { config, workspaces } from "./api";
 import { inboxCounts, useRuns } from "./backgroundRuns";
 import { FlowRunsItem } from "./FlowRunAlerts";
 import { showTasks, useTasks } from "./humanTasks";
 import { message, reason } from "./errors";
 import { configChanged, filesTouchedEvent, showPending, showView } from "./events";
 import type { AgentInfo, GetGitStatusResponse, WorkspaceProcess } from "./gen/blitz/v1/workspace_pb";
+import type { GetOrgSyncResponse } from "./gen/blitz/v1/config_pb";
 import { t, tn } from "./i18n";
 import { effortIcon, efforts, modeOf, modes } from "./options";
 import { workspaceColor } from "./palette";
@@ -52,14 +68,14 @@ import { InboxDrawer } from "./RunsInbox";
 import { useAdvanced, useApp } from "./state";
 import { shownVersion } from "./serviceVersion";
 import { contextShare, tokens, useWorkspaceStatus } from "./status";
-import { Button, Dialog, Icon, Menu, useSnackbar, type MenuEntry } from "./ui/controls";
+import { Button, Dialog, Icon, Menu, useSnackbar, type MenuEntry } from "@blitz/webui";
 import { useWorkerFailures } from "./workerFailures";
 
 /** How often the branch and changed files are asked for while shown. */
 const gitPollMs = 10_000;
 
 /**
- * The status bar along the window's foot (spec_desktop_024 DSK-39): the
+ * The status bar along the window's foot (spec_024_desktop DSK-39): the
  * service and the workspace in view, its git branch, what runs, and the
  * agent, model, permission mode, context and cost, with the editor's
  * cursor when a file is shown. Items open what they describe.
@@ -68,6 +84,10 @@ export function StatusBar({ serviceUp, version, onWorkspaceSettings }: { service
   const { prefs, activity, theme } = useApp();
   const ws = prefs.workspaces.find((w) => w.dir === prefs.active && w.open);
   const dir = ws?.dir ?? "";
+  const [orgSync, setOrgSync] = useOrgSync(serviceUp ? dir : "");
+  // A workspace kept in step shows its sync; Git's branch beside it in
+  // advanced mode, where Changes' Git work is.
+  const advanced = useAdvanced();
   return (
     <footer className="status-bar t-label-sm" role="contentinfo" aria-label={t("desktop.status.label")}>
       {/* The service: an icon, green while it answers and red while it's
@@ -88,18 +108,104 @@ export function StatusBar({ serviceUp, version, onWorkspaceSettings }: { service
             <span className="sb-swatch" style={{ background: workspaceColor(ws.color, theme) }} />
             <span className="ellipsis">{displayName(ws)}</span>
           </span>
-          {serviceUp && <GitItem dir={dir} />}
+          {serviceUp && orgSync && <OrgSyncItem dir={dir} state={orgSync} onState={setOrgSync} />}
+          {serviceUp && (!orgSync || advanced) && <GitItem dir={dir} />}
         </>
       )}
       <span className="spacer" />
       {ws && <Activity dir={dir} running={!!activity[dir]?.running} waiting={!!activity[dir]?.waiting} />}
       {serviceUp && <TasksItem />}
+      {serviceUp && <ApprovalsItem dir={dir} />}
       {serviceUp && <RunsItem />}
       {serviceUp && <FlowRunsItem />}
       {ws && <FailedItem dir={dir} />}
       {ws && serviceUp && <WorkspaceItems dir={dir} onWorkspaceSettings={() => onWorkspaceSettings(dir)} />}
     </footer>
   );
+}
+
+/** How often an organization workspace's sync state is asked for. */
+const orgSyncPollMs = 3_000;
+
+/**
+ * An organization workspace's sync, while the service keeps it in step
+ * (spec_053_enterprise EN-64); undefined for any other workspace.
+ */
+function useOrgSync(dir: string): [GetOrgSyncResponse | undefined, (s: GetOrgSyncResponse) => void] {
+  const [state, setState] = useState<GetOrgSyncResponse>();
+  useEffect(() => {
+    setState(undefined);
+    if (!dir) return;
+    let live = true;
+    const ask = () =>
+      config.getOrgSync({ workspace: dir }).then(
+        (r) => live && setState(r.state ? r : undefined),
+        () => live && setState(undefined),
+      );
+    void ask();
+    const timer = setInterval(() => void ask(), orgSyncPollMs);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [dir]);
+  return [state, setState];
+}
+
+const orgSyncIcons: Record<string, string> = {
+  saved: mdiCloudCheckOutline,
+  saving: mdiCloudSyncOutline,
+  offline: mdiCloudOffOutline,
+  signed_out: mdiAccountAlertOutline,
+  conflicts: mdiFileCompare,
+  refused: mdiCloudAlertOutline,
+};
+
+/**
+ * The sync's state in words, never Git's: Saved, Saving…, Offline, Signed
+ * out, Both versions kept. Its menu has Save now, which saves and sends
+ * what waits at once, and says why it isn't saved.
+ */
+function OrgSyncItem({ dir, state, onState }: { dir: string; state: GetOrgSyncResponse; onState: (s: GetOrgSyncResponse) => void }) {
+  const snack = useSnackbar();
+  const [saving, setSaving] = useState(false);
+  const label = state.state === "conflicts" ? tn("desktop.org.sync.conflicts", state.pairs.length) : t(`desktop.org.sync.${state.state}`);
+  const detail = [state.error, ...state.pairs.map((p) => t("desktop.org.sync.pair", { shared: p.shared, mine: p.mine }))].filter(Boolean).join("\n");
+  const warn = ["conflicts", "signed_out", "refused"].includes(state.state);
+  const saveNow = async () => {
+    setSaving(true);
+    try {
+      const r = await config.saveOrgSync({ workspace: dir });
+      onState({ ...state, state: r.state, error: r.error, pairs: r.pairs });
+      snack(r.state === "saved" || r.state === "conflicts" ? t("desktop.org.sync.saved_now") : t(`desktop.org.sync.${r.state}`), { error: orgSyncFailed(r.state) });
+    } catch (e) {
+      snack(reason(e) === "GIT_BUSY" ? t("desktop.org.sync.busy") : message(e), { error: reason(e) !== "GIT_BUSY" });
+    } finally {
+      setSaving(false);
+    }
+  };
+  const items: MenuEntry[] = [
+    { heading: label },
+    { label: t("desktop.org.sync.save_now"), detail: detail || undefined, icon: mdiCloudUploadOutline, disabled: saving, onSelect: () => void saveNow() },
+  ];
+  return (
+    <Menu
+      placement="up start"
+      className="wide-menu"
+      trigger={(p) => (
+        <button className={`sb-item sb-button ${warn ? "warn-text" : ""}`} title={detail || label} aria-label={label} {...p}>
+          <Icon path={orgSyncIcons[saving ? "saving" : state.state] ?? mdiCloudCheckOutline} size="sm" />
+          <span className="ellipsis">{saving ? t("desktop.org.sync.saving") : label}</span>
+        </button>
+      )}
+      items={items}
+    />
+  );
+}
+
+/** Whether a sync's state means the service hasn't got this computer's saves. */
+export function orgSyncFailed(state: string): boolean {
+  return state === "offline" || state === "signed_out" || state === "refused";
 }
 
 function GitItem({ dir }: { dir: string }) {
@@ -185,6 +291,63 @@ function RunsItem() {
   );
 }
 
+// The organization's jobs waiting for the person's answer (spec_053
+// EN-43): a count, and a menu of what each asks to do with Approve and
+// Deny; each new one notifies, as an agent waiting does.
+function ApprovalsItem({ dir }: { dir: string }) {
+  const { prefs } = useApp();
+  const snack = useSnackbar();
+  const { runs, reload } = useServiceApprovals();
+  const seen = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const ids = new Set(runs.map((g) => g.run?.id ?? ""));
+    if (seen.current && prefs.notifications === "on") {
+      for (const g of runs) {
+        const id = g.run?.id ?? "";
+        if (!seen.current.has(id)) notify(t("desktop.approvals.notify_title", { job: g.jobName }), `${g.run?.pending?.tool}: ${g.run?.pending?.detail}`, g.dir || dir);
+      }
+    }
+    seen.current = ids; // the first list is what was there already
+  }, [runs, prefs.notifications, dir]);
+  if (runs.length === 0) return null;
+  const answer = async (g: GoingServiceRun, approve: boolean) => {
+    try {
+      await config.answerServiceRun({ runId: g.run?.id ?? "", approve, note: "" });
+      snack(t(approve ? "desktop.approvals.approved" : "desktop.approvals.denied", { job: g.jobName }));
+    } catch (e) {
+      snack(message(e), { error: true });
+    }
+    reload();
+  };
+  const label = t("desktop.approvals.label", { count: runs.length });
+  const items: MenuEntry[] = [
+    { heading: t("desktop.approvals.heading") },
+    ...runs.map((g) => ({
+      label: g.jobName,
+      detail: [t("desktop.approvals.asks", { tool: g.run?.pending?.tool ?? "", detail: g.run?.pending?.detail ?? "" }), displayName(prefs.workspaces.find((w) => w.dir === g.dir) ?? { dir: g.dir })].join(" · "),
+      icon: mdiCloudOutline,
+      onSelect: () => (g.dir === dir ? showView({ dir, view: "workers", worker: g.jobName }) : undefined),
+      actions: [
+        { icon: mdiCheck, label: t("desktop.approvals.approve"), removes: true, onSelect: () => void answer(g, true) },
+        { icon: mdiClose, label: t("desktop.approvals.deny"), removes: true, onSelect: () => void answer(g, false) },
+      ],
+    })),
+  ];
+  return (
+    <Menu
+      placement="up start"
+      className="wide-menu"
+      trigger={(p) => (
+        <button className="sb-item sb-button sb-warn" title={label} aria-label={label} {...p}>
+          <Icon path={mdiAccountClockOutline} size="sm" />
+          <span>{runs.length}</span>
+        </button>
+      )}
+      items={items}
+    />
+  );
+}
+
 // Workflows' human tasks waiting, in any workspace: opens the tasks dialog.
 function TasksItem() {
   const { tasks } = useTasks();
@@ -199,7 +362,7 @@ function TasksItem() {
 }
 
 // The agents' background processes, in any workspace
-// (spec_processes_052 PR-50): a board icon, green while some run (amber
+// (spec_052_processes PR-50): a board icon, green while some run (amber
 // when one is flagged) and greyed when none do, the count in its hover
 // text. It opens a menu of them by workspace, each with what it uses and
 // Stop; a pick, or Output and details, opens the drawer on its output.
@@ -218,8 +381,21 @@ function ProcessesItem({ dir }: { dir: string }) {
   };
   const open = (p?: WorkspaceProcess) => showView({ dir, view: "processes", process: p?.process?.id, processIn: p?.workspace });
   const now = Date.now();
+  // The organization's runs going now (spec_053 EN-42), after this computer's.
+  const { runs: serviceRuns } = useServiceRuns();
+  const service: MenuEntry[] = serviceRuns.length
+    ? [
+        { heading: t("desktop.processes.service") },
+        ...serviceRuns.map((g) => ({
+          label: g.jobName,
+          detail: [displayName(prefs.workspaces.find((w) => w.dir === g.dir) ?? { dir: g.dir }), t(`desktop.service_job.status.${g.run?.status}`), took(ms(g.run?.created), now)].join(" · "),
+          icon: mdiCloudOutline,
+          onSelect: () => (g.dir === dir ? showView({ dir, view: "workers", worker: g.jobName }) : open()),
+        })),
+      ]
+    : [];
   const items: MenuEntry[] = !on
-    ? [{ heading: t("desktop.processes.title") }, { label: t("desktop.processes.empty_all"), disabled: true, onSelect: () => {} }]
+    ? [{ heading: t("desktop.processes.title") }, { label: t("desktop.processes.empty_all"), disabled: true, onSelect: () => {} }, ...service]
     : [
         ...byWorkspace(list, dir).flatMap((g): MenuEntry[] => [
           { heading: displayName(prefs.workspaces.find((w) => w.dir === g.workspace) ?? { dir: g.workspace }) },
@@ -232,6 +408,7 @@ function ProcessesItem({ dir }: { dir: string }) {
             actions: [{ icon: mdiStopCircleOutline, label: t("desktop.processes.stop"), removes: true, onSelect: () => void stop([p]) }],
           })),
         ]),
+        ...service,
         "divider",
         ...(flagged.length > 0
           ? [{ label: `${t("desktop.processes.stop_flagged")} (${flagged.length})`, icon: mdiStopCircleOutline, danger: true, onSelect: () => setConfirm(true) }]
@@ -386,7 +563,13 @@ function WorkspaceItems({ dir, onWorkspaceSettings }: { dir: string; onWorkspace
             { heading: t("desktop.status.agent_heading") },
             ...agents.map((a) => ({
               label: a.displayName || a.name,
-              detail: [a.description, a.pinnedModel && t("desktop.status.agent_pinned", { model: a.pinnedModel })].filter(Boolean).join(" · "),
+              detail: [
+                a.orgLock && t(a.orgLock === "locked" ? "desktop.org.item_locked" : "desktop.org.item_default"),
+                a.description,
+                a.pinnedModel && t("desktop.status.agent_pinned", { model: a.pinnedModel }),
+              ]
+                .filter(Boolean)
+                .join(" · "),
               icon: mdiRobotOutline,
               on: a.active,
               onSelect: () => void setAgent(a.name, a.displayName || a.name),

@@ -21,10 +21,10 @@ import { message } from "./errors";
 import { t } from "./i18n";
 import type { WorkerPolicySettings } from "./gen/blitz/v1/worker_pb";
 import { limitFields, permissionKinds, toggleKind, type LimitField } from "./workersOverview";
-import { Chip, useSnackbar } from "./ui/controls";
+import { Chip, useSnackbar } from "@blitz/webui";
 
 /**
- * The global limits on every worker (Settings › Workers; spec_workers_023
+ * The global limits on every worker (Settings › Workers; spec_023_workers
  * WK-63), [workers.policy] in the global settings: how many runs go at
  * once, what a worker that sets no limit gets and the most it may ask for
  * (model calls, cost, time), and the permission kinds it may be given.

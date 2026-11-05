@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/retail-cortex/blitz/pkg/api"
@@ -32,7 +33,7 @@ import (
 )
 
 // The workspace and its remote: fetch, pull, push, and a pull's conflicts
-// (Changes, spec_desktop_024 DSK-90b). The user asks for each; nothing
+// (Changes, spec_024_desktop DSK-90b). The user asks for each; nothing
 // here runs on the agent's behalf.
 //
 // Fetching and pulling run git's transport, credential helpers, filters
@@ -191,20 +192,40 @@ func mergingName(git func(args ...string) ([]byte, error)) string {
 // remote URL do so) when fetching, merging or pushing.
 var commandKeys = regexp.MustCompile(`^(core\.(sshcommand|gitproxy|askpass)|credential\..*helper|filter\..*\.(clean|smudge|process)|merge\..*\.driver|remote\..*\.(uploadpack|receivepack)|protocol\.(.*\.)?allow|gpg\.(.*\.)?program)$`)
 
+// trustedHelpers are the credential helpers a repository's own config may
+// name: Blitz's own, which Blitz sets in a folder shared with the
+// organization (TrustCredentialHelper).
+var trustedHelpers sync.Map
+
+// TrustCredentialHelper lets a repository's own config name helper, a
+// credential helper exactly as given (Blitz's own git-credential), for
+// any host: the helper answers only for the organization's service.
+func TrustCredentialHelper(helper string) {
+	if helper != "" {
+		trustedHelpers.Store(helper, true)
+	}
+}
+
 // checkRepoConfig refuses a repository whose own config (with its
-// includes) sets a setting that runs a command.
+// includes) sets a setting that runs a command, other than a trusted
+// credential helper.
 func (w *Workspace) checkRepoConfig(ctx context.Context) error {
 	for _, scope := range []string{"--local", "--worktree"} {
-		cmd := exec.CommandContext(ctx, "git", "config", scope, "--includes", "--name-only", "-z", "--list")
+		cmd := exec.CommandContext(ctx, "git", "config", scope, "--includes", "-z", "--list")
 		cmd.Dir = w.Dir()
 		out, err := cmd.Output()
 		if err != nil {
 			continue // --worktree without extensions.worktreeConfig, say
 		}
-		for _, key := range strings.Split(string(out), "\x00") {
-			if key = strings.ToLower(strings.TrimSpace(key)); key != "" && commandKeys.MatchString(key) {
-				return &RepoConfigError{Key: key}
+		for _, entry := range strings.Split(string(out), "\x00") {
+			key, value, _ := strings.Cut(entry, "\n")
+			if key = strings.ToLower(strings.TrimSpace(key)); key == "" || !commandKeys.MatchString(key) {
+				continue
 			}
+			if _, ok := trustedHelpers.Load(value); (ok || value == "") && strings.HasPrefix(key, "credential.") && strings.HasSuffix(key, ".helper") {
+				continue // Blitz's own, or none: an empty one clears those before it
+			}
+			return &RepoConfigError{Key: key}
 		}
 	}
 	return nil

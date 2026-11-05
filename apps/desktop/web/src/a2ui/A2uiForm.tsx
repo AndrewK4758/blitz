@@ -18,7 +18,7 @@ import { useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { mdiAccountCircleOutline, mdiAlertCircleOutline, mdiCheck, mdiClose, mdiPlus } from "@mdi/js";
 import { t } from "../i18n";
-import { Button, Chip, Dialog, Field, Icon, Segmented, Tabs } from "../ui/controls";
+import { Button, Chip, Dialog, Field, Icon, Segmented, Tabs } from "@blitz/webui";
 import { actionOf, byId, childrenOf, failing, formProblems, resolve, safeUrl, scoped, setPath, type Component, type Form, type FormAction } from "./model";
 
 /** The basic catalog's icons this renderer draws (others are left out). */
@@ -31,7 +31,7 @@ const textClass: Record<string, string> = { h1: "t-headline", h2: "t-headline", 
 const justify: Record<string, string> = { start: "flex-start", center: "center", end: "flex-end", spaceBetween: "space-between", spaceAround: "space-around", spaceEvenly: "space-evenly", stretch: "stretch" };
 
 /**
- * An A2UI v0.9 form (spec_workflows_043 WF-18), drawn with the app's own
+ * An A2UI v0.9 form (spec_043_workflows WF-18), drawn with the app's own
  * controls: the basic catalog's components, inputs bound to its data, the
  * catalog's checks, and buttons whose actions answer it (onAction with the
  * action's name and context). Nothing in a form is run as code or HTML:

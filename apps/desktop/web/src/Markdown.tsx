@@ -42,7 +42,7 @@ import { htmlPicture, isDataImage, pictureURL } from "./files/pictures";
 import { t, useLanguage } from "./i18n";
 import { MermaidBlock } from "./mermaid";
 import type { DocTarget } from "./docs/index";
-import { Icon, useSnackbar } from "./ui/controls";
+import { Icon, useSnackbar } from "@blitz/webui";
 
 /** The Markdown file being shown: its workspace and its path in it. */
 export interface MarkdownDoc {
@@ -96,7 +96,7 @@ async function openPath(dir: string, to: Extract<LinkTarget, { kind: "path" }>) 
 /**
  * Follows a link in a document (FIL-56): a web or mail link in the system
  * browser (one to this machine's web server in a web tab, where the window
- * shows them: spec_electron_038 EL-102), #heading to it in el's document,
+ * shows them: spec_038_electron EL-102), #heading to it in el's document,
  * a workspace path in the editor or the tree; fail says why not.
  */
 export function followLink(href: string, doc: { dir: string; path: string }, el: Element, fail: (message: string) => void) {

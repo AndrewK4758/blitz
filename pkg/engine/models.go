@@ -57,6 +57,7 @@ func (w *Workspace) agentInfo(name string) api.AgentInfo {
 	info := api.AgentInfo{Name: name, Active: name == w.engine.ActiveAgent()}
 	if spec, ok := w.agents.Get(name); ok {
 		info.DisplayName, info.Description = spec.DisplayName, spec.Description
+		info.OrgLock = w.cfg.Org.LockOf(spec.Path)
 	}
 	if m, pinned := w.engine.AgentModel(name); pinned {
 		info.PinnedModel = m
@@ -288,8 +289,9 @@ func (w *Workspace) ReloadProviders(ctx context.Context, cfg *config.Config) err
 		c.LLM = cfg.LLM
 		c.Blitz.DefaultModel = cfg.Blitz.DefaultModel
 		c.Audio = cfg.Audio
-		c.Health = cfg.Health   // the dashboard's judge and schedule, set from it
-		c.Harness = cfg.Harness // and the reflector's
+		c.Health = cfg.Health         // the dashboard's judge and schedule, set from it
+		c.Harness = cfg.Harness       // and the reflector's
+		c.Enterprise = cfg.Enterprise // the organization whose models these are
 	})
 	w.setupSpeaker(ctx, func(string) {}) // before the rebuild, which lists generate_audio once there's a speaker
 	w.setupUploader(ctx, func(string) {})

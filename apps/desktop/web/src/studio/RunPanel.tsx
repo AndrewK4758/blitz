@@ -31,7 +31,7 @@ import {
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { WorkflowRun, WorkflowRunStep } from "../gen/blitz/v1/workspace_pb";
 import { t, tn } from "../i18n";
-import { Button, Icon, IconButton, Tabs, useSnackbar } from "../ui/controls";
+import { Button, Icon, IconButton, Tabs, useSnackbar } from "@blitz/webui";
 import { modeOf } from "../options";
 import { cost, ms, progress, tokens, took } from "../workflowRuns";
 
@@ -83,7 +83,7 @@ type Tab = "steps" | "events" | "stream";
 const heightKey = "blitz.flows.run_height";
 
 /**
- * A workflow run's receipt under its canvas (spec_workflows_043 WF-19):
+ * A workflow run's receipt under its canvas (spec_043_workflows WF-19):
  * how it's going or how it ended, when, how long and what it's spent; its
  * steps' runs (when each started, how long it took, its tries, models,
  * tokens and cost), its events, and the text a step's turns streamed. It

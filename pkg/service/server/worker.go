@@ -1,0 +1,536 @@
+// Copyright 2026 Retail Cortex
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/retail-cortex/blitz/pkg/api"
+	"github.com/retail-cortex/blitz/pkg/config"
+	"github.com/retail-cortex/blitz/pkg/engine"
+	"github.com/retail-cortex/blitz/pkg/redact"
+
+	"connectrpc.com/connect"
+	pb "github.com/retail-cortex/blitz/proto/blitz/v1"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
+)
+
+// workerService implements WorkerService.
+type workerService struct{ s *Server }
+
+var errNoScheduler = apiError(connect.CodeFailedPrecondition, "NO_SCHEDULER", errors.New("this server doesn't run workers"))
+
+func workerState(s api.State) pb.WorkerState {
+	switch s {
+	case api.StateNew:
+		return pb.WorkerState_WORKER_STATE_NEW
+	case api.StateEnabled:
+		return pb.WorkerState_WORKER_STATE_ENABLED
+	case api.StateDisabled:
+		return pb.WorkerState_WORKER_STATE_DISABLED
+	case api.StateChanged:
+		return pb.WorkerState_WORKER_STATE_CHANGED
+	case api.StateInvalid:
+		return pb.WorkerState_WORKER_STATE_INVALID
+	}
+	return pb.WorkerState_WORKER_STATE_UNSPECIFIED
+}
+
+func workerMsg(i api.WorkerInfo) *pb.Worker {
+	var last *pb.WorkerRun
+	if i.LastRun != nil {
+		last = runMsg(*i.LastRun)
+	}
+	return &pb.Worker{
+		LastRun:   last,
+		Workspace: i.Workspace, Name: i.Name, Description: i.Description, Path: i.Path, Hash: i.Hash,
+		State: workerState(i.State), Schedule: i.Schedule, Cron: i.Cron, Timezone: i.Timezone, NextRun: timestamp(i.Next),
+		Agent: i.Agent, Model: i.Model, Permissions: i.Permissions, Workflow: i.Workflow, RunsOn: i.RunsOn, OnRequest: i.OnRequest, Merge: i.Merge,
+		Limits:   &pb.WorkerLimits{MaxTurns: int32(i.Limits.MaxTurns), MaxCostUsd: i.Limits.MaxCostUSD, Timeout: durationpb.New(i.Limits.Timeout)},
+		Problems: i.Problems,
+	}
+}
+
+func runStatus(s api.RunStatus) pb.RunStatus {
+	switch s {
+	case api.RunRunning:
+		return pb.RunStatus_RUN_STATUS_RUNNING
+	case api.RunSucceeded:
+		return pb.RunStatus_RUN_STATUS_SUCCEEDED
+	case api.RunFailed:
+		return pb.RunStatus_RUN_STATUS_FAILED
+	case api.RunLimited:
+		return pb.RunStatus_RUN_STATUS_LIMITED
+	case api.RunSkipped:
+		return pb.RunStatus_RUN_STATUS_SKIPPED
+	case api.RunStopped:
+		return pb.RunStatus_RUN_STATUS_STOPPED
+	}
+	return pb.RunStatus_RUN_STATUS_UNSPECIFIED
+}
+
+func runMsg(r api.Run) *pb.WorkerRun {
+	out := &pb.WorkerRun{
+		Id: r.ID, Workspace: r.Workspace, Worker: r.Worker, Hash: r.Hash, Status: runStatus(r.Status), Manual: r.Manual,
+		Started: timestamp(r.Started), Duration: durationpb.New(r.Duration),
+		// A cost means the model had a price (an unpriced one's runs cost
+		// nothing), so the desktop app shows it.
+		Usage: &pb.Usage{Calls: int32(r.Calls), CostUsd: r.CostUSD, Priced: r.CostUSD > 0}, SessionId: r.SessionID, Files: r.Files,
+	}
+	for _, f := range r.Refusals {
+		out.Refusals = append(out.Refusals, &pb.Refusal{Tool: f.Tool, Kind: actionKind(f.Kind), Detail: f.Detail, Time: timestamp(f.Time)})
+	}
+	if r.Error != "" {
+		out.Error = &pb.ErrorInfo{Reason: "RUN_" + strings.ToUpper(string(r.Status)), Message: r.Error}
+	}
+	return out
+}
+
+func (h workerService) ListWorkers(ctx context.Context, r req[pb.ListWorkersRequest]) (*connect.Response[pb.ListWorkersResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	dirs := []string{r.Msg.Workspace}
+	if r.Msg.Workspace == "" {
+		dirs = sc.cfg.Store.Workspaces()
+	}
+	out := &pb.ListWorkersResponse{}
+	for _, dir := range dirs {
+		w, err := h.s.workspace(ctx, dir)
+		// A folder deleted since its workers were enabled doesn't hide the
+		// other workspaces' workers (ListAllWorkers reports it as missing).
+		if err != nil && r.Msg.Workspace == "" && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		list, err := w.ListWorkers()
+		if err != nil {
+			return nil, toAPI(err)
+		}
+		for _, info := range list {
+			out.Workers = append(out.Workers, workerMsg(info))
+		}
+	}
+	return ok(out)
+}
+
+func (h workerService) CreateWorker(ctx context.Context, r req[pb.CreateWorkerRequest]) (*connect.Response[pb.CreateWorkerResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	m := r.Msg
+	info, problems, err := w.CreateWorker(api.WorkerSpec{
+		Name: m.Name, Description: m.Description, Schedule: m.Schedule, Timezone: m.Timezone, Agent: m.Agent, Model: m.Model,
+		Permissions: m.Permissions, Limits: api.Limits{MaxTurns: int(m.MaxTurns), MaxCostUSD: m.MaxCostUsd, TimeoutRaw: m.Timeout},
+		CatchUp: m.CatchUp, RunsOn: m.RunsOn, OnRequest: m.OnRequest, Merge: m.Merge, Prompt: m.Prompt, Workflow: m.Workflow,
+	})
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	if len(problems) > 0 {
+		return ok(&pb.CreateWorkerResponse{Problems: problems})
+	}
+	return ok(&pb.CreateWorkerResponse{Worker: workerMsg(info)})
+}
+
+func (h workerService) GetWorkerSpec(ctx context.Context, r req[pb.GetWorkerSpecRequest]) (*connect.Response[pb.GetWorkerSpecResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	spec, hash, err := w.GetWorkerSpec(r.Msg.Name)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	return ok(&pb.GetWorkerSpecResponse{Worker: workerDefinition(spec), Hash: hash})
+}
+
+func (h workerService) UpdateWorker(ctx context.Context, r req[pb.UpdateWorkerRequest]) (*connect.Response[pb.UpdateWorkerResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	if r.Msg.Worker == nil {
+		return nil, invalid(errors.New("worker is required"))
+	}
+	info, problems, err := w.UpdateWorker(workerSpec(r.Msg.Worker), r.Msg.Hash)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	if len(problems) > 0 {
+		return ok(&pb.UpdateWorkerResponse{Problems: problems})
+	}
+	if sc := h.s.sched; sc != nil {
+		sc.rescan(ctx) // an enabled worker edited is suspended at once
+	}
+	return ok(&pb.UpdateWorkerResponse{Worker: workerMsg(info)})
+}
+
+func workerDefinition(s api.WorkerSpec) *pb.WorkerDefinition {
+	return &pb.WorkerDefinition{
+		Name: s.Name, Description: s.Description, Schedule: s.Schedule, Timezone: s.Timezone, Agent: s.Agent, Model: s.Model,
+		Permissions: s.Permissions, MaxTurns: int32(s.Limits.MaxTurns), MaxCostUsd: s.Limits.MaxCostUSD, Timeout: s.Limits.TimeoutRaw,
+		CatchUp: s.CatchUp, RunsOn: s.RunsOn, OnRequest: s.OnRequest, Merge: s.Merge, Prompt: s.Prompt, Workflow: s.Workflow,
+	}
+}
+
+func workerSpec(d *pb.WorkerDefinition) api.WorkerSpec {
+	return api.WorkerSpec{
+		Name: d.Name, Description: d.Description, Schedule: d.Schedule, Timezone: d.Timezone, Agent: d.Agent, Model: d.Model,
+		Permissions: d.Permissions, Limits: api.Limits{MaxTurns: int(d.MaxTurns), MaxCostUSD: d.MaxCostUsd, TimeoutRaw: d.Timeout},
+		CatchUp: d.CatchUp, RunsOn: d.RunsOn, OnRequest: d.OnRequest, Merge: d.Merge, Prompt: d.Prompt, Workflow: d.Workflow,
+	}
+}
+
+func (h workerService) EnableWorker(ctx context.Context, r req[pb.EnableWorkerRequest]) (*connect.Response[pb.EnableWorkerResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	info, err := w.EnableWorker(r.Msg.Name, r.Msg.Hash)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	sc.rescan(ctx)
+	return ok(&pb.EnableWorkerResponse{Worker: workerMsg(info)})
+}
+
+func (h workerService) DisableWorker(ctx context.Context, r req[pb.DisableWorkerRequest]) (*connect.Response[pb.DisableWorkerResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	info, err := w.DisableWorker(r.Msg.Name)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	sc.rescan(ctx)
+	return ok(&pb.DisableWorkerResponse{Worker: workerMsg(info)})
+}
+
+func (h workerService) DeleteWorker(ctx context.Context, r req[pb.DeleteWorkerRequest]) (*connect.Response[pb.DeleteWorkerResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	if sc := h.s.sched; sc != nil && len(sc.liveRuns(w.Dir(), r.Msg.Name)) > 0 {
+		return nil, toAPI(api.ErrRunInProgress)
+	}
+	if err := w.DeleteWorker(r.Msg.Name); err != nil {
+		return nil, toAPI(err)
+	}
+	if sc := h.s.sched; sc != nil {
+		sc.rescan(ctx)
+	}
+	return ok(&pb.DeleteWorkerResponse{})
+}
+
+func (h workerService) RunWorker(ctx context.Context, r req[pb.RunWorkerRequest]) (*connect.Response[pb.RunWorkerResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	key, err := canonical(r.Msg.Workspace)
+	if err != nil {
+		return nil, apiError(connect.CodeInvalidArgument, "INVALID_WORKSPACE", err, "workspace", r.Msg.Workspace)
+	}
+	run, err := sc.start(ctx, key, r.Msg.Name, true)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	return ok(&pb.RunWorkerResponse{Run: runMsg(run)})
+}
+
+func (h workerService) ListWorkerRuns(ctx context.Context, r req[pb.ListWorkerRunsRequest]) (*connect.Response[pb.ListWorkerRunsResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	runs, err := w.WorkerRuns(r.Msg.Name, int(r.Msg.Limit))
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	out := &pb.ListWorkerRunsResponse{}
+	for _, run := range withLive(sc.liveRuns(w.Dir(), r.Msg.Name), runs) {
+		out.Runs = append(out.Runs, runMsg(run))
+	}
+	return ok(out)
+}
+
+// withLive is the runs going now, then the recorded ones, each run once:
+// a finished run is recorded before the scheduler lets it go, so for a
+// moment it's in both.
+func withLive(live, recorded []api.Run) []api.Run {
+	out := slices.Clone(live)
+	for _, run := range recorded {
+		if !slices.ContainsFunc(live, func(l api.Run) bool { return l.ID == run.ID }) {
+			out = append(out, run)
+		}
+	}
+	return out
+}
+
+func (h workerService) UndoWorkerRun(ctx context.Context, r req[pb.UndoWorkerRunRequest]) (*connect.Response[pb.UndoWorkerRunResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	res, err := w.UndoWorkerRun(r.Msg.RunId, r.Msg.Force)
+	// Anything restored is reported, with why the rest wasn't.
+	if err != nil && len(res.Restored) == 0 {
+		return nil, toAPI(err)
+	}
+	return ok(&pb.UndoWorkerRunResponse{Restored: res.Restored, Error: errorInfo(err)})
+}
+
+func (h workerService) GetWorkerRun(_ context.Context, r req[pb.GetWorkerRunRequest]) (*connect.Response[pb.GetWorkerRunResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	if lr := sc.liveRun(r.Msg.RunId); lr != nil {
+		lr.mu.Lock()
+		defer lr.mu.Unlock()
+		return ok(&pb.GetWorkerRunResponse{Run: runMsg(lr.run)})
+	}
+	run, found, err := sc.cfg.Runs.Get(r.Msg.RunId)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	if !found {
+		return nil, apiError(connect.CodeNotFound, "UNKNOWN_RUN", fmt.Errorf("no run %q", r.Msg.RunId), "run_id", r.Msg.RunId)
+	}
+	return ok(&pb.GetWorkerRunResponse{Run: runMsg(run)})
+}
+
+// ListRunningWorkerRuns lists the runs going now in every workspace,
+// oldest first.
+func (h workerService) ListRunningWorkerRuns(context.Context, req[pb.ListRunningWorkerRunsRequest]) (*connect.Response[pb.ListRunningWorkerRunsResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	runs := sc.liveRuns("", "")
+	slices.SortFunc(runs, func(a, b api.Run) int { return a.Started.Compare(b.Started) })
+	out := &pb.ListRunningWorkerRunsResponse{}
+	for _, r := range runs {
+		out.Runs = append(out.Runs, runMsg(r))
+	}
+	return ok(out)
+}
+
+// StopWorkerRun stops a run going now; it ends, recorded as stopped, once
+// its turn has wound down.
+func (h workerService) StopWorkerRun(_ context.Context, r req[pb.StopWorkerRunRequest]) (*connect.Response[pb.StopWorkerRunResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	run, live := sc.stopRun(r.Msg.RunId)
+	if !live {
+		return nil, apiError(connect.CodeNotFound, "RUN_NOT_RUNNING", fmt.Errorf("run %q isn't running", r.Msg.RunId), "run_id", r.Msg.RunId)
+	}
+	return ok(&pb.StopWorkerRunResponse{Run: runMsg(run)})
+}
+
+// RewriteWorker has the model rewrite a worker's instructions (nothing is
+// saved).
+func (h workerService) RewriteWorker(ctx context.Context, r req[pb.RewriteWorkerRequest]) (*connect.Response[pb.RewriteWorkerResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	if r.Msg.Worker == nil {
+		return nil, apiError(connect.CodeInvalidArgument, "NO_INSTRUCTIONS", engine.ErrNoInstructions)
+	}
+	rw, err := w.RewriteWorker(ctx, workerSpec(r.Msg.Worker))
+	if errors.Is(err, engine.ErrNoInstructions) {
+		return nil, apiError(connect.CodeInvalidArgument, "NO_INSTRUCTIONS", err)
+	}
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	return ok(&pb.RewriteWorkerResponse{Prompt: rw.Prompt, Permissions: rw.Permissions, Changes: rw.Changes, Problem: rw.Problem})
+}
+
+// WatchWorkerRun streams a running run's events from its start, then live
+// ones, until it finishes. Events aren't kept once a run has finished.
+func (h workerService) WatchWorkerRun(ctx context.Context, r req[pb.WatchWorkerRunRequest], stream *connect.ServerStream[pb.WatchWorkerRunResponse]) error {
+	sc := h.s.sched
+	if sc == nil {
+		return errNoScheduler
+	}
+	lr := sc.liveRun(r.Msg.RunId)
+	if lr == nil {
+		return apiError(connect.CodeNotFound, "RUN_NOT_RUNNING", fmt.Errorf("run %q isn't running (GetWorkerRun has its record)", r.Msg.RunId), "run_id", r.Msg.RunId)
+	}
+	sent := 0
+	for {
+		lr.mu.Lock()
+		pending, done, changed := lr.events[sent:], lr.done, lr.changed
+		lr.mu.Unlock()
+		for _, ev := range pending {
+			if err := stream.Send(&pb.WatchWorkerRunResponse{Event: ev}); err != nil {
+				return err
+			}
+		}
+		sent += len(pending)
+		if done {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (h workerService) PreviewSchedule(_ context.Context, r req[pb.PreviewScheduleRequest]) (*connect.Response[pb.PreviewScheduleResponse], error) {
+	n := int(r.Msg.Count)
+	if n <= 0 {
+		n = 5
+	}
+	p, err := engine.PreviewSchedule(r.Msg.Schedule, r.Msg.Timezone, n, time.Now())
+	if err != nil {
+		return ok(&pb.PreviewScheduleResponse{Problem: err.Error()})
+	}
+	out := &pb.PreviewScheduleResponse{Cron: p.Cron, Timezone: p.Timezone}
+	for _, t := range p.Next {
+		out.NextRuns = append(out.NextRuns, timestamppb.New(t))
+	}
+	return ok(out)
+}
+
+func (h workerService) ListAllWorkers(ctx context.Context, _ req[pb.ListAllWorkersRequest]) (*connect.Response[pb.ListAllWorkersResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	home, err := config.EnsureHomeWorkspace("")
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(h.s.configDir)
+	if err != nil {
+		return nil, invalid(err)
+	}
+	path, _, err := config.ReadSettingsFile(h.s.configDir, "")
+	if err != nil {
+		return nil, invalid(err)
+	}
+	p := cfg.Workers.Policy
+	policy := &pb.WorkerPolicySettings{
+		Allow: p.Allow, DefaultMaxTurns: int32(p.DefaultMaxTurns), DefaultMaxCostUsd: p.DefaultMaxCostUSD, DefaultTimeout: p.DefaultTimeout,
+		MaxTurns: int32(p.MaxTurns), MaxCostUsd: p.MaxCostUSD, MaxTimeout: p.MaxTimeout,
+		MaxConcurrent: int32(p.MaxConcurrent), RunningMaxConcurrent: int32(cap(sc.slots)), Path: path,
+	}
+	known := sc.cfg.Store.Known()
+	others := slices.Sorted(maps.Keys(known))
+	others = slices.DeleteFunc(others, func(d string) bool { return d == home })
+	out := &pb.ListAllWorkersResponse{Home: home, Policy: policy}
+	for _, dir := range append([]string{home}, others...) {
+		group := &pb.WorkspaceWorkers{Workspace: dir, Home: dir == home}
+		out.Workspaces = append(out.Workspaces, group)
+		if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+			group.Missing = true
+			for _, name := range slices.Sorted(maps.Keys(known[dir])) {
+				state := pb.WorkerState_WORKER_STATE_DISABLED
+				if known[dir][name] {
+					state = pb.WorkerState_WORKER_STATE_ENABLED
+				}
+				group.Workers = append(group.Workers, &pb.Worker{Workspace: dir, Name: name, State: state})
+			}
+			continue
+		}
+		w, err := h.s.workspace(ctx, dir)
+		if err != nil {
+			group.Problem = redact.Mask(err.Error())
+			continue
+		}
+		list, err := w.ListWorkers()
+		if err != nil {
+			group.Problem = redact.Mask(err.Error())
+			continue
+		}
+		for _, info := range list {
+			group.Workers = append(group.Workers, workerMsg(info))
+		}
+	}
+	return ok(out)
+}
+
+func (h workerService) ForgetWorkspaceWorkers(ctx context.Context, r req[pb.ForgetWorkspaceWorkersRequest]) (*connect.Response[pb.ForgetWorkspaceWorkersResponse], error) {
+	sc := h.s.sched
+	if sc == nil {
+		return nil, errNoScheduler
+	}
+	dir := r.Msg.Workspace
+	if real, err := canonical(dir); err == nil {
+		dir = real
+	} else if !filepath.IsAbs(dir) {
+		return nil, apiError(connect.CodeInvalidArgument, "INVALID_WORKSPACE", err, "workspace", dir)
+	}
+	if len(sc.liveRuns(dir, "")) > 0 {
+		return nil, toAPI(api.ErrRunInProgress)
+	}
+	if err := sc.cfg.Store.ForgetWorkspace(dir); err != nil {
+		return nil, err
+	}
+	sc.rescan(ctx)
+	return ok(&pb.ForgetWorkspaceWorkersResponse{})
+}
+
+func (h workerService) MoveWorkerToService(ctx context.Context, r req[pb.MoveWorkerToServiceRequest]) (*connect.Response[pb.MoveWorkerToServiceResponse], error) {
+	w, err := h.s.workspace(ctx, r.Msg.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	problems, info, moved, err := w.MoveToService(r.Msg.Name, r.Msg.Force)
+	if err != nil {
+		return nil, toAPI(err)
+	}
+	out := &pb.MoveWorkerToServiceResponse{Problems: problems, Moved: moved}
+	if moved {
+		out.Worker = workerMsg(info)
+	}
+	return ok(out)
+}

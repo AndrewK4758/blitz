@@ -31,13 +31,13 @@ import { intent as newIntent } from "./intent";
 import { WorkersPane } from "./studio/WorkersPane";
 import { lastFailed, workerStateLabel } from "./Workers";
 import { workspaceFlag } from "./workersOverview";
-import { Button, Chip, Dialog, Icon, IconButton, useSnackbar } from "./ui/controls";
+import { Button, Chip, Dialog, Icon, IconButton, useSnackbar } from "@blitz/webui";
 
 /** How often the overview asks for every workspace's workers again. */
 const overviewPollMs = 10000;
 
 /**
- * Settings › Workers (spec_workers_023 WK-60–WK-62): the global workers,
+ * Settings › Workers (spec_023_workers WK-60–WK-62): the global workers,
  * saved in ~/.blitz/workers and run in the home workspace, listed and
  * edited as Studio lists a workspace's; the limits on every worker; the
  * worker runs going now, in

@@ -19,11 +19,11 @@ import { mdiScaleBalance } from "@mdi/js";
 import { licenseText, type LicenseText } from "./desktop";
 import { message } from "./errors";
 import { t } from "./i18n";
-import { Segmented } from "./ui/controls";
-import { Drawer } from "./ui/Drawer";
+import { Segmented } from "@blitz/webui";
+import { Drawer } from "@blitz/webui";
 
 /**
- * Blitz's license terms (spec_release_readiness_030 RR-05): the NOTICE,
+ * Blitz's license terms (spec_030_release_readiness RR-05): the NOTICE,
  * the Apache License and the third-party notices, as the app embeds them.
  * Opened from Settings › About and by /license.
  */
